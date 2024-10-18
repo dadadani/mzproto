@@ -19,15 +19,18 @@ pub const Test = struct {
     asdtest: [][]const u8,
 };
 
-fn unionPayloadPtr(comptime T: type, union_ptr: anytype) ?*T {
+pub fn unionPayloadPtr(comptime T: type, comptime TE: type, union_ptr: anytype) ?*T {
     const U = @typeInfo(@TypeOf(union_ptr)).Pointer.child;
-    var i = 0;
+    //var i: i32 = 0;
     inline for (@typeInfo(U).Union.fields) |field| {
-        defer i += 1;
-        if (field.field_type != T)
+        //defer i += 1;
+        std.debug.print("trying field {s} {d} {d} {d}\n", .{ field.name, 0, @intFromEnum(union_ptr.*), @intFromEnum(@field(TE, field.name)) });
+        if (field.type != T)
             continue;
-        if (@intFromEnum(union_ptr.*) == i)
+        if (@intFromEnum(union_ptr.*) == @intFromEnum(@field(TE, field.name))) {
+            std.debug.print("found field {s}\n", .{field.name});
             return &@field(union_ptr, field.name);
+        }
     }
     return null;
 }
@@ -88,7 +91,7 @@ fn vectorEncodedSize(in: anytype) usize {
     return result;
 }
 
-inline fn strEncodedSize(s: []const u8) usize {
+pub fn strEncodedSize(s: []const u8) usize {
     var result: usize = 0;
     if (s.len <= 253) {
         result = 1 + s.len;

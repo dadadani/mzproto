@@ -140,7 +140,7 @@ fn concat(allocator: std.mem.Allocator, a: []u8, b: []const u8) ![]u8 {
     return ab;
 }
 
-const GenerateFieldTypeError = error{ UnsupportedIntBits, UnsupportedGenericArg };
+const GenerateFieldTypeError = error{ UnsupportedIntBits, UnsupportedGenericArg, UnsupportedNestedVectors };
 
 fn generateFieldType(allocator: std.mem.Allocator, field: TLParameterType, mtproto: bool) ![]const u8 {
     switch (field) {
@@ -192,6 +192,9 @@ fn generateFieldType(allocator: std.mem.Allocator, field: TLParameterType, mtpro
                 const normalized = try normalizeNameAlloc(allocator, field.Normal.type, mtproto);
                 defer allocator.free(normalized);
 
+                //result = try concat(allocator, result, "*const ");
+
+                result = try concat(allocator, result, "I");
                 result = try concat(allocator, result, normalized);
             }
 
@@ -200,10 +203,10 @@ fn generateFieldType(allocator: std.mem.Allocator, field: TLParameterType, mtpro
     }
 }
 
-fn generateDefinition(writer: std.io.AnyWriter, def: *const constructors.TLConstructor, mtproto: bool) !void {
-    _ = try writer.write("    ");
+fn generateDefinition(allocator: std.mem.Allocator, writer: std.io.AnyWriter, def: *const constructors.TLConstructor, mtproto: bool) !void {
+    _ = try writer.write("const ");
     _ = try normalizeName(writer, def, mtproto);
-    _ = try writer.write(": struct {\n");
+    _ = try writer.write("= struct {\n");
     for (def.params.items) |param| {
         const name = name: {
             if (std.mem.eql(u8, param.name, "Type")) {
@@ -220,21 +223,41 @@ fn generateDefinition(writer: std.io.AnyWriter, def: *const constructors.TLConst
 
         const typeName = try generateFieldType(def.allocator, param.type.?, mtproto);
         defer def.allocator.free(typeName);
+        if (std.mem.eql(u8, typeName, "usize")) {
+            continue;
+        }
 
-        _ = try writer.print("        {s}: {s},\n", .{ name, typeName });
+        _ = try writer.print("    {s}: {s},\n", .{ name, typeName });
     }
-    _ = try writer.write("    },\n");
+
+    _ = try generateSizeFn(allocator, def, writer);
+    _ = try generateSerializeFn(allocator, def, writer);
+    _ = try writer.write("};\n");
 }
 
-fn tlGenBaseUnion(writer: std.io.AnyWriter, definitions: *const std.ArrayList(constructors.TLConstructor), mtproto_definitions: *const std.ArrayList(constructors.TLConstructor)) !void {
-    _ = try writer.write("const TL = union(TLID) {\n");
-
+fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, definitions: *const std.ArrayList(constructors.TLConstructor), mtproto_definitions: *const std.ArrayList(constructors.TLConstructor)) !void {
     for (mtproto_definitions.items) |def| {
-        try generateDefinition(writer, &def, true);
+        try generateDefinition(allocator, writer, &def, true);
     }
 
     for (definitions.items) |def| {
-        try generateDefinition(writer, &def, false);
+        try generateDefinition(allocator, writer, &def, false);
+    }
+
+    _ = try writer.write("const TL = union(TLID) {\n");
+
+    for (mtproto_definitions.items) |def| {
+        _ = try normalizeName(writer, def, true);
+        _ = try writer.write(": ");
+        _ = try normalizeName(writer, def, true);
+        _ = try writer.write(",\n");
+    }
+
+    for (definitions.items) |def| {
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(": ");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(",\n");
     }
 
     _ = try writer.write("};\n");
@@ -260,6 +283,149 @@ fn constructorTypeHash(def: *const types.TLType, mtproto: bool) u32 {
     hash.update(def.name);
 
     return hash.final();
+}
+
+fn safeParamName(in: []const u8) []const u8 {
+    if (std.mem.eql(u8, in, "type")) {
+        return "Type";
+    }
+    if (std.mem.eql(u8, in, "error")) {
+        return "Error";
+    }
+    if (std.mem.eql(u8, in, "test")) {
+        return "Test";
+    }
+    return in;
+}
+
+fn generateSerializeFnFlags(flag_name: []const u8, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    for (def.params.items) |param| {
+        if (param.type_def)
+            continue;
+        switch (param.type.?) {
+            .Normal => if (param.type.?.Normal.flag) |flag| {
+                if (std.mem.eql(u8, flag_name, flag.name)) {
+                    _ = try writer.print("        if (self.{s}) {{\n             flag_{s} = flag_{s} | 1 << {d};\n        }}\n", .{ flag_name, flag_name, flag_name, flag.index });
+                }
+            },
+            .Flags => {},
+        }
+    }
+}
+
+fn generateSerializeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    //    var flags = std.StringArrayHashMap(usize).init(allocator);
+    //    defer flags.deinit();
+    _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []const u8) void {\n");
+
+    for (def.params.items) |param| {
+        if (param.type_def) {
+            _ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+            continue;
+        }
+
+        switch (param.type.?) {
+            .Flags => {
+                _ = try writer.print("        var flag_{s}: usize = 0;\n", .{param.name});
+                try generateSerializeFnFlags(param.name, def, writer);
+            },
+            .Normal => {
+                _ = try writer.print("        //IMPLEMENT NORMAL\n", .{});
+            },
+        }
+    }
+    _ = allocator;
+
+    _ = try writer.write("    }\n");
+}
+
+fn generateSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    _ = try writer.write("    pub fn size(self: *const @This()) usize {\n");
+    if (def.params.items.len == 0) {
+        _ = try writer.write("        _ = self;\n        return 4;\n    }");
+        return;
+    }
+    _ = try writer.write("        var result: usize = 4; // id\n");
+    var usedSelf = false;
+
+    for (def.params.items) |param| {
+        _ = try writer.print("        // {s}\n", .{param.name});
+        if (param.type_def) {
+            _ = try writer.print("        result += self.{s}.size();\n", .{safeParamName(param.name)});
+        } else {
+            switch (param.type.?) {
+                .Flags => {
+                    _ = try writer.print("        result += 4; // {s}\n", .{param.name});
+                },
+                .Normal => {
+                    if (param.type.?.Normal.flag != null and std.mem.eql(u8, param.type.?.Normal.type.name, "true")) {
+                        _ = try writer.print("        // true flag\n\n", .{});
+                        continue;
+                    }
+                    _ = try writer.print("        const param{s} = self.{s};\n", .{ param.name, safeParamName(param.name) });
+                    var paramName = try concat(allocator, try allocator.dupe(u8, "param"), param.name);
+                    defer allocator.free(paramName);
+                    if (param.type.?.Normal.flag) |_| {
+                        _ = try writer.print("        if ({s}) |{s}flag| {{\n", .{ paramName, paramName });
+                        paramName = try concat(allocator, paramName, "flag");
+                    }
+
+                    var generic_arg = param.type.?.Normal.type.generic_arg;
+                    while (generic_arg) |garg| {
+                        if (garg.namespaces.items.len > 0) {
+                            return GenerateFieldTypeError.UnsupportedGenericArg;
+                        }
+
+                        if (!std.mem.eql(u8, garg.name, "Vector")) {
+                            return GenerateFieldTypeError.UnsupportedGenericArg;
+                        }
+
+                        _ = try writer.print("        result += 4; // vector id\n", .{});
+                        _ = try writer.print("        result += 4; // vector size\n", .{});
+                        _ = try writer.print("        for ({s}) |{s}item| {{\n", .{ paramName, paramName });
+
+                        paramName = try concat(allocator, paramName, "item");
+
+                        generic_arg = garg.generic_arg;
+                    }
+
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "int")) {
+                        _ = try writer.print("        result += @sizeOf(@TypeOf({s}));", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "long")) {
+                        _ = try writer.print("        result += @sizeOf(@TypeOf({s}));", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.print("        result += base.strEncodedSize({s});", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "double")) {
+                        _ = try writer.print("        result += @sizeOf(@TypeOf({s}));", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "int128")) {
+                        _ = try writer.print("        result += @sizeOf(@TypeOf({s}));", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "int256")) {
+                        _ = try writer.print("        result += @sizeOf(@TypeOf({s}));", .{paramName});
+                    } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
+                        _ = try writer.print("        _ = {s};\n        result += 4;", .{paramName});
+                    } else {
+                        _ = try writer.print("        result += {s}.size();\n", .{paramName});
+                    }
+                    usedSelf = true;
+                    generic_arg = param.type.?.Normal.type.generic_arg;
+                    while (generic_arg) |garg| {
+                        _ = try writer.write("        }\n");
+                        generic_arg = garg.generic_arg;
+                    }
+
+                    if (param.type.?.Normal.flag) |_| {
+                        _ = try writer.write("        }\n");
+                    }
+
+                    _ = try writer.write("\n");
+                },
+            }
+        }
+    }
+    if (!usedSelf) {
+        _ = try writer.write("\n        _ = self;\n");
+    }
+    _ = try writer.write("        return result;\n    }\n");
 }
 
 fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, definitions: *const std.ArrayList(constructors.TLConstructor), mtproto_definitions: *const std.ArrayList(constructors.TLConstructor)) !void {
@@ -291,17 +457,43 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
     while (iterator.next()) |asd| {
         _ = try writer.write("const ");
         _ = try normalizeName(writer, asd.value_ptr.items[0].type, false);
-        _ = try writer.write(" = union(TLID) {\n");
+        _ = try writer.write("EnumID = enum(u32) {\n");
         for (asd.value_ptr.items) |def| {
             _ = try writer.write("    ");
             _ = try normalizeName(writer, def, false);
-            _ = try writer.write(": TL.");
+            _ = try writer.print(" = {d},\n", .{def.id});
+        }
+        _ = try writer.write("};\n");
+
+        _ = try writer.write("const I");
+        _ = try normalizeName(writer, asd.value_ptr.items[0].type, false);
+        _ = try writer.write(" = union(");
+        _ = try normalizeName(writer, asd.value_ptr.items[0].type, false);
+        _ = try writer.write("EnumID) {\n");
+        for (asd.value_ptr.items) |def| {
+            _ = try writer.write("    ");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(": *const ");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(",\n");
         }
+
+        _ = try writer.write("    pub fn size(self: *const @This()) usize {\n        switch (self.*) {\n");
+
+        for (asd.value_ptr.items) |def| {
+            _ = try writer.write("                .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" => { return self.");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(".size(); },\n");
+        }
+        _ = try writer.write("        }\n");
+        _ = try writer.write("    }\n");
+
         _ = try writer.write("};\n");
     }
 
+    // Not needed
     _ = mtproto_definitions;
 }
 
@@ -335,8 +527,10 @@ pub fn main() !void {
         const file = try std.fs.cwd().createFile("api.zig", .{});
         defer file.close();
 
+        _ = try file.write("const base = @import(\"base.zig\");\n");
+
         try tlGenIdEnum(file.writer().any(), &definitions, &mtproto_definitions);
-        try tlGenBaseUnion(file.writer().any(), &definitions, &mtproto_definitions);
+        try tlGenBaseUnion(allocator.allocator(), file.writer().any(), &definitions, &mtproto_definitions);
         try tlGenerateBoxedUnion(allocator.allocator(), file.writer().any(), &definitions, &mtproto_definitions);
     }
     _ = allocator.detectLeaks();

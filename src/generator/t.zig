@@ -130,4 +130,6 @@ test {
     const written = tl.encode(data);
 
     try std.testing.expectEqual(size, written);
+
+    //const asd = 1 | 1;
 }
