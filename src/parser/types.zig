@@ -44,7 +44,7 @@ pub const TLType = struct {
             }
             namespaces.deinit();
         }
-        var split_ns = std.mem.split(u8, genericArg[0], ".");
+        var split_ns = std.mem.splitSequence(u8, genericArg[0], ".");
 
         while (split_ns.next()) |ns| {
             try namespaces.append(try allocator.dupe(u8, ns));

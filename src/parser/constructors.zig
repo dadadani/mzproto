@@ -23,7 +23,7 @@ pub const TLConstructor = struct {
         }
 
         const left, const right = try split: {
-            var s = std.mem.split(u8, constructor, "=");
+            var s = std.mem.splitSequence(u8, constructor, "=");
             const left = utils.trimWhitespace(s.next() orelse unreachable);
             if (s.next()) |right| {
                 break :split .{ left, utils.trimWhitespace(right) };
@@ -44,7 +44,7 @@ pub const TLConstructor = struct {
         };
 
         const name, const id_str = id: {
-            var split = std.mem.split(u8, name_id, "#");
+            var split = std.mem.splitSequence(u8, name_id, "#");
             const name = split.next() orelse unreachable;
             break :id .{ name, split.next() };
         };
@@ -57,7 +57,7 @@ pub const TLConstructor = struct {
             namespace.deinit();
         }
 
-        var ns_split = std.mem.split(u8, name, ".");
+        var ns_split = std.mem.splitSequence(u8, name, ".");
         while (ns_split.next()) |ns| {
             try namespace.append(try allocator.dupe(u8, ns));
         }
@@ -93,7 +93,7 @@ pub const TLConstructor = struct {
             flag_defs.deinit();
         }
         if (middle) |smiddle| {
-            var split = std.mem.split(u8, smiddle, " ");
+            var split = std.mem.splitSequence(u8, smiddle, " ");
             while (split.next()) |param| {
                 if (param.len == 0) {
                     continue;

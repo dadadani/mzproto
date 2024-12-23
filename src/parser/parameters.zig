@@ -23,7 +23,7 @@ pub const TLParameter = struct {
         }
 
         const name, const ty = try ty: {
-            var split = std.mem.split(u8, in, ":");
+            var split = std.mem.splitSequence(u8, in, ":");
             if (split.next()) |name| {
                 if (split.next()) |ty| {
                     break :ty .{ name, ty };
