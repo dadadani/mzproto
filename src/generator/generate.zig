@@ -9,14 +9,6 @@ const base = @import("./base.zig");
 //fn readTypes(constructor: *const constructors.TLConstructor) void {
 
 //}
-
-const TLConstructorIDs = enum(u32) {
-    A = 32,
-    B = 36,
-    C = 29,
-    D = 1,
-};
-
 fn parseFile(allocator: std.mem.Allocator, definitions: *std.ArrayList(constructors.TLConstructor), filename: []const u8) !void {
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
