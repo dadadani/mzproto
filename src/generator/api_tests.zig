@@ -3,10 +3,11 @@ const api = @import("api.zig");
 
 test "basic constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
-    defer _ = std.testing.allocator_instance.detectLeaks();
+    //defer _ = std.testing.allocator_instance.detectLeaks();
 
     {
-        const constructor = api.IInputUser{ .InputUserSelf = &api.InputUserSelf{} };
+        var user = api.InputUserSelf{};
+        const constructor = api.IInputUser{ .InputUserSelf = &user };
 
         var dest = try allocator.alloc(u8, constructor.serializedSize());
         defer allocator.free(dest);
@@ -15,10 +16,8 @@ test "basic constructor serialize & deserialize" {
 
         dest = dest[0..serialized];
 
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-
-        const deserialized = try api.IInputUser.deserialize(arena.allocator(), dest);
+        const deserialized = try api.IInputUser.deserialize(std.testing.allocator, dest);
+        defer deserialized[1].deinit(std.testing.allocator);
 
         switch (deserialized[1]) {
             .InputUserSelf => {},
@@ -26,15 +25,15 @@ test "basic constructor serialize & deserialize" {
         }
     }
 
-    _ = std.testing.allocator_instance.detectLeaks();
+    //_ = std.testing.allocator_instance.detectLeaks();
 }
 
 test "basic constructor with some fields serialize & deserialize" {
     const allocator = std.testing.allocator;
-    defer _ = std.testing.allocator_instance.detectLeaks();
 
     {
-        const constructor = api.IInputFile{ .InputFile = &api.InputFile{ .id = 123, .parts = 59535612, .name = "namefieldhere", .md5_checksum = "itworks!!!!0AA" } };
+        var file = api.InputFile{ .id = 123, .parts = 59535612, .name = "namefieldhere", .md5_checksum = "itworks!!!!0AA" };
+        var constructor = api.IInputFile{ .InputFile = &file };
 
         var dest = try allocator.alloc(u8, constructor.serializedSize());
         defer allocator.free(dest);
@@ -43,10 +42,8 @@ test "basic constructor with some fields serialize & deserialize" {
 
         dest = dest[0..serialized];
 
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-
-        const deserialized = try api.IInputFile.deserialize(arena.allocator(), dest);
+        const deserialized = try api.IInputFile.deserialize(allocator, dest);
+        defer deserialized[1].deinit(allocator);
 
         switch (deserialized[1]) {
             .InputFile => {
@@ -64,12 +61,7 @@ test "basic constructor with some fields serialize & deserialize" {
 test "deserialize constructor with int vector" {
     const data = [_]u8{ 60, 65, 92, 248, 191, 237, 60, 25, 0, 0, 0, 0, 21, 196, 181, 28, 3, 0, 0, 0, 128, 0, 0, 0, 128, 0, 0, 0, 0, 1, 0, 0 };
 
-    defer _ = std.testing.allocator_instance.detectLeaks();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const deserialized = try api.IVideoSize.deserialize(arena.allocator(), &data);
+    const deserialized = try api.IVideoSize.deserialize(std.testing.allocator, &data);
 
     try std.testing.expectEqual(data.len, deserialized[0]);
 
@@ -81,23 +73,27 @@ test "deserialize constructor with int vector" {
         },
         else => unreachable,
     }
+    deserialized[1].deinit(std.testing.allocator);
 }
 
 test "big constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
-    defer _ = std.testing.allocator_instance.detectLeaks();
 
-    const constructor = api.IMessage{ .Message = &api.Message{
+    var restr = api.RestrictionReason{ .platform = "test", .text = "test", .reason = "reason" };
+
+    var channel = api.PeerChannel{
+        .channel_id = 3543543,
+    };
+
+    var m = api.Message{
         .id = 32,
         .message = "asdasd",
-        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &api.RestrictionReason{ .platform = "test", .text = "test", .reason = "reason" } }},
-        .peer_id = api.IPeer{
-            .PeerChannel = &api.PeerChannel{
-                .channel_id = 3543543,
-            },
-        },
+        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &restr }},
+        .peer_id = api.IPeer{ .PeerChannel = &channel },
         .date = 342432432,
-    } };
+    };
+
+    const constructor = api.IMessage{ .Message = &m };
 
     const size = constructor.serializedSize();
     var dest = try allocator.alloc(u8, size);
@@ -107,14 +103,16 @@ test "big constructor serialize & deserialize" {
 
     dest = dest[0..serialized];
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const deserialize = try api.IMessage.deserialize(arena.allocator(), dest);
+    const deserialize = try api.IMessage.deserialize(std.testing.allocator, dest);
+    defer deserialize[1].deinit(std.testing.allocator);
 
     switch (deserialize[1]) {
         .Message => {
             const message = deserialize[1].Message;
+
+            if (message.from_id) |mm| {
+                std.debug.print("la fin {any}", .{mm});
+            }
             try std.testing.expectEqual(32, message.id);
             try std.testing.expectEqualStrings("asdasd", message.message);
             try std.testing.expectEqual(342432432, message.date);
@@ -129,9 +127,9 @@ test "big constructor serialize & deserialize" {
                 },
             }
 
-            switch (message.peer_id) {
+            switch (message.peer_id.?) {
                 .PeerChannel => {
-                    const peer_channel = message.peer_id.PeerChannel;
+                    const peer_channel = message.peer_id.?.PeerChannel;
                     try std.testing.expectEqual(3543543, peer_channel.channel_id);
                 },
                 else => unreachable,

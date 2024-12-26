@@ -201,8 +201,11 @@ fn generateFieldType(allocator: std.mem.Allocator, field: TLParameterType, mtpro
                 defer allocator.free(normalized);
 
                 //result = try concat(allocator, result, "*const ");
-
-                result = try concat(allocator, result, "I");
+                if (field.Normal.flag != null or field.Normal.type.generic_arg != null) {
+                    result = try concat(allocator, result, "I");
+                } else {
+                    result = try concat(allocator, result, "?I");
+                }
                 result = try concat(allocator, result, normalized);
             }
 
@@ -245,6 +248,7 @@ fn generateDefinition(allocator: std.mem.Allocator, writer: std.io.AnyWriter, de
     _ = try generateSizeFn(allocator, def, writer);
     _ = try generateSerializeFn(allocator, def, writer);
     _ = try generateDeserializeFn(allocator, def, writer);
+    _ = try generateDeinitFn(allocator, def, writer);
     _ = try writer.write("};\n");
 }
 
@@ -261,14 +265,14 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
 
     for (mtproto_definitions.items) |def| {
         _ = try normalizeName(writer, def, true);
-        _ = try writer.write(": *const ");
+        _ = try writer.write(": * ");
         _ = try normalizeName(writer, def, true);
         _ = try writer.write(",\n");
     }
 
     for (definitions.items) |def| {
         _ = try normalizeName(writer, def, false);
-        _ = try writer.write(": *const ");
+        _ = try writer.write(": * ");
         _ = try normalizeName(writer, def, false);
         _ = try writer.write(",\n");
     }
@@ -276,10 +280,10 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
     // hardcoded ids
     _ = try writer.write("    BoolTrue: true,\n");
     _ = try writer.write("    BoolFalse: false,\n");
-    _ = try writer.write("    MessageContainer: *const MessageContainer,\n");
-    _ = try writer.write("    FutureSalts: *const FutureSalts,\n");
-    _ = try writer.write("    RPCResult: *const RPCResult,\n");
-    _ = try writer.write("    Vector: *const Vector,\n");
+    _ = try writer.write("    MessageContainer: *MessageContainer,\n");
+    _ = try writer.write("    FutureSalts: *FutureSalts,\n");
+    _ = try writer.write("    RPCResult: *RPCResult,\n");
+    _ = try writer.write("    Vector: *Vector,\n");
     _ = try writer.write("    GZipPacked: unreachable,\n");
     _ = try writer.write("    Int: i32,\n");
     _ = try writer.write("    Long: i64,\n");
@@ -304,6 +308,18 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
         _ = try writer.write(" => { return self.");
         _ = try normalizeName(writer, def, false);
         _ = try writer.write(".serialize(dest); },\n");
+    }
+    _ = try writer.write("        }\n");
+    _ = try writer.write("    }\n");
+
+    _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
+
+    for (definitions.items) |def| {
+        _ = try writer.write("        .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => { self.");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(".deinit(allocator); },\n");
     }
     _ = try writer.write("        }\n");
     _ = try writer.write("    }\n");
@@ -380,6 +396,104 @@ fn generateSerializeFnFlags(flag_name: []const u8, def: *const constructors.TLCo
     _ = try writer.print("        written += base.serializeInt(flag_{s}, dest[written..]);\n", .{flag_name});
 }
 
+fn generateDeinitFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n      defer allocator.destroy(self);\n");
+
+    if (def.params.items.len == 0) {
+        _ = try writer.write("    }\n");
+        return;
+    }
+
+    //var used = false;
+
+    for (def.params.items) |param| {
+        if (param.type_def) {
+            _ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+            continue;
+        }
+        switch (param.type.?) {
+            .Normal => {
+                if (param.type_def) {
+                    _ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+                    continue;
+                }
+
+                var toFree = true;
+
+                if ((std.mem.eql(u8, param.type.?.Normal.type.name, "int") or std.mem.eql(u8, param.type.?.Normal.type.name, "long") or std.mem.eql(u8, param.type.?.Normal.type.name, "double") or std.mem.eql(u8, param.type.?.Normal.type.name, "int128") or std.mem.eql(u8, param.type.?.Normal.type.name, "int256") or std.mem.eql(u8, param.type.?.Normal.type.name, "true") or std.mem.eql(u8, param.type.?.Normal.type.name, "true") or std.mem.eql(u8, param.type.?.Normal.type.name, "Bool"))) {
+                    if (param.type.?.Normal.type.generic_arg == null) {
+                        continue;
+                    }
+                    toFree = false;
+                }
+
+                var param_name = try concat(allocator, try allocator.dupe(u8, "param"), safeParamName(param.name));
+                defer allocator.free(param_name);
+
+                //used = true;
+
+                _ = try writer.print("      const {s} = self.{s};\n", .{ param_name, safeParamName(param.name) });
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.print("      if ({s}) |{s}flag| {{\n", .{ param_name, param_name });
+                    param_name = try concat(allocator, param_name, "flag");
+                }
+
+                var generic_arg = param.type.?.Normal.type.generic_arg;
+                while (generic_arg) |garg| {
+                    if (garg.namespaces.items.len > 0) {
+                        return GenerateFieldTypeError.UnsupportedGenericArg;
+                    }
+
+                    if (!std.mem.eql(u8, garg.name, "Vector")) {
+                        return GenerateFieldTypeError.UnsupportedGenericArg;
+                    }
+
+                    generic_arg = garg.generic_arg;
+
+                    _ = try writer.print("        defer allocator.free({s});\n        for ({s}) |{s}item| {{\n", .{ param_name, param_name, param_name });
+
+                    param_name = try concat(allocator, param_name, "item");
+                }
+
+                if (toFree) {
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.print("        allocator.free({s});\n", .{param_name});
+                    } else {
+                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
+                            _ = try writer.print("          if ({s}) |{s}defined| {{\n", .{ param_name, param_name });
+                            param_name = try concat(allocator, param_name, "defined");
+                        }
+
+                        _ = try writer.print("        {s}.deinit(allocator);\n", .{param_name});
+
+                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
+                            _ = try writer.write("          }\n");
+                        }
+                    }
+                } else {
+                    _ = try writer.print("        _ = {s};\n", .{param_name});
+                }
+
+                generic_arg = param.type.?.Normal.type.generic_arg;
+                while (generic_arg) |garg| {
+                    _ = try writer.write("        }\n");
+                    generic_arg = garg.generic_arg;
+                }
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.write("        }\n");
+                }
+            },
+            else => {
+                continue;
+            },
+        }
+    }
+
+    _ = try writer.write("\n    }\n");
+}
+
 fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
     _ = try writer.write("    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct {usize, *@This()} {\n");
 
@@ -447,11 +561,15 @@ fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.
                 if (std.mem.eql(u8, param.type.?.Normal.type.name, "int") or std.mem.eql(u8, param.type.?.Normal.type.name, "long") or std.mem.eql(u8, param.type.?.Normal.type.name, "double") or std.mem.eql(u8, param.type.?.Normal.type.name, "int128") or std.mem.eql(u8, param.type.?.Normal.type.name, "int256")) {
                     _ = try writer.print("        read += base.deserializeInt(@TypeOf({s}), src[read..], &{s});\n", .{ param_name, param_name });
                 } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
-                    _ = try writer.print("        read += try base.deserializeString(allocator, src[read..], &{s});\n", .{param_name});
+                    _ = try writer.print("        read += try base.deserializeString(allocator, src[read..], &{s});\n        errdefer allocator.free({s});\n", .{ param_name, param_name });
                 } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                     _ = try writer.print("        {s} = base.deserializeBool(src[read..], &read);\n", .{param_name});
                 } else {
-                    _ = try writer.print("        {{ const deserialized = try @TypeOf({s}).deserialize(allocator, src[read..]); read += deserialized[0]; {s} = deserialized[1]; }}\n", .{ param_name, param_name });
+                    var mustOptional: []const u8 = "";
+                    if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
+                        mustOptional = ".?";
+                    }
+                    _ = try writer.print("        {{ const deserialized = try @TypeOf({s}{s}).deserialize(allocator, src[read..]); read += deserialized[0]; {s} = deserialized[1]; errdefer {s}{s}.deinit(); }}\n", .{ param_name, mustOptional, param_name, param_name, mustOptional });
                 }
 
                 generic_arg = param.type.?.Normal.type.generic_arg;
@@ -467,7 +585,7 @@ fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.
                 }
 
                 if (param.type.?.Normal.flag) |_| {
-                    _ = try writer.write("        }\n");
+                    _ = try writer.print("        }} else {{\n            result.{s} = null;\n        }}\n", .{safeParamName(param.name)});
                 }
 
                 _ = try writer.write("\n");
@@ -542,7 +660,11 @@ fn generateSerializeFn(allocator: std.mem.Allocator, def: *const constructors.TL
                 } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                     _ = try writer.print("        written += base.serializeInt(if ({s}) @as(u32, 0x997275b5) else @as(u32, 0xbc799737), dest[written..]);\n", .{paramName});
                 } else {
-                    _ = try writer.print("        written += {s}.serialize(dest[written..]);\n", .{paramName});
+                    var mustOptional: []const u8 = "";
+                    if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
+                        mustOptional = ".?";
+                    }
+                    _ = try writer.print("        written += {s}{s}.serialize(dest[written..]);\n", .{ paramName, mustOptional });
                 }
 
                 generic_arg = param.type.?.Normal.type.generic_arg;
@@ -622,7 +744,11 @@ fn generateSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConst
                     } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                         _ = try writer.print("        _ = {s};\n        result += 4;", .{paramName});
                     } else {
-                        _ = try writer.print("        result += {s}.serializedSize();\n", .{paramName});
+                        var mustOptional: []const u8 = "";
+                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
+                            mustOptional = ".?";
+                        }
+                        _ = try writer.print("        result += {s}{s}.serializedSize();\n", .{ paramName, mustOptional });
                     }
                     usedSelf = true;
                     generic_arg = param.type.?.Normal.type.generic_arg;
@@ -691,7 +817,7 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
         for (ty.value_ptr.items) |def| {
             _ = try writer.write("    ");
             _ = try normalizeName(writer, def, false);
-            _ = try writer.write(": *const ");
+            _ = try writer.write(": * ");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(",\n");
         }
@@ -716,6 +842,18 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
             _ = try writer.write(" => { return self.");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(".serialize(dest); },\n");
+        }
+        _ = try writer.write("        }\n");
+        _ = try writer.write("    }\n");
+
+        _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
+
+        for (ty.value_ptr.items) |def| {
+            _ = try writer.write("                .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" => { self.");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(".deinit(allocator); },\n");
         }
         _ = try writer.write("        }\n");
         _ = try writer.write("    }\n");

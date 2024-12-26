@@ -100,7 +100,7 @@ pub fn deserializeString(allocator: std.mem.Allocator, src: []const u8, dest: *[
 
         @memcpy((&actualLen)[0..3], src[1..4]);
         actualLen[3] = 0;
-
+        
         len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
         dest.* = try allocator.alloc(u8, len);
         @memcpy(@constCast(dest.*), src[4 .. 4 + len]);
