@@ -288,41 +288,21 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
     _ = try writer.write("    Int: i32,\n");
     _ = try writer.write("    Long: i64,\n");
 
-    _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n        switch (self.*) {\n");
+    _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n        switch (self.*) {\n        inline else => |x| x.serializedSize(),\n        }\n    }\n");
 
-    for (definitions.items) |def| {
-        _ = try writer.write("        .");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(" => { return self.");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(".serializedSize(); },\n");
-    }
-    _ = try writer.write("        }\n");
-    _ = try writer.write("    }\n");
+    _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        switch (self.*) {\n        inline else => |x| x.serialize(dest),\n        }\n    }\n");
 
-    _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        switch (self.*) {\n");
+    //    _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
 
-    for (definitions.items) |def| {
-        _ = try writer.write("        .");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(" => { return self.");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(".serialize(dest); },\n");
-    }
-    _ = try writer.write("        }\n");
-    _ = try writer.write("    }\n");
-
-    _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
-
-    for (definitions.items) |def| {
-        _ = try writer.write("        .");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(" => { self.");
-        _ = try normalizeName(writer, def, false);
-        _ = try writer.write(".deinit(allocator); },\n");
-    }
-    _ = try writer.write("        }\n");
-    _ = try writer.write("    }\n");
+    //    for (definitions.items) |def| {
+    //        _ = try writer.write("        .");
+    //        _ = try normalizeName(writer, def, false);
+    //        _ = try writer.write(" => { self.");
+    //        _ = try normalizeName(writer, def, false);
+    //        _ = try writer.write(".deinit(allocator); },\n");
+    //    }
+    //    _ = try writer.write("        }\n");
+    //    _ = try writer.write("    }\n");
 
     _ = try writer.write("};\n");
 }
@@ -927,8 +907,8 @@ pub fn main() !void {
         try tlGenBaseUnion(allocator.allocator(), file.writer().any(), &definitions, &mtproto_definitions);
         try tlGenerateBoxedUnion(allocator.allocator(), file.writer().any(), &definitions, &mtproto_definitions);
 
-        _ = try file.write("pub const ProtoMessage = struct {\n    msg_id: u64,\n    seqno: i32,\n    body: TL,\n\n    pub fn serializedSize(self: *const @This()) usize {\n        return 16 + self.body.serializedSize();\n    }\n\n    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        var written: usize = 0;\n        written += base.serializeLong(self.msg_id, dest[written..]);\n        written += base.serializeInt(self.seqno, dest[written..]);\n\n        const tlWritten = self.body.serialize(dest[written + 4 ..]);\n\n        written += base.serializeInt(tlWritten, dest[written..]);\n        return written + tlWritten;\n    }\n\n    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct { usize, *@This() } {\n        var result = try allocator.create(@This());\n        var read: usize = 0;\n        read += base.deserializeLong(src[read..], &result.msg_id);\n        read += base.deserializeInt(src[read..], &result.seqno);\n\n        var bodyLength: i32 = undefined;\n        read += base.deserializeInt(src[read..], &bodyLength);\n\n        result.body = try TL.deserialize(allocator, src[read .. read + bodyLength])[1];\n        read += bodyLength;\n\n        return .{ read, result };\n    }\n};");
-        _ = try file.write("pub const FutureSalts = struct {\n    req_msg_id: u64,\n    now: u32,\n    salts: []const base.FutureSalt,\n\n    pub fn serializedSize(self: *const @This()) usize {\n        return 20 + (self.salts.len * 16);\n    }\n\n    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        var written: usize = 0;\n        written += base.serializeInt(@as(u32, 0xae500895), dest[written..]);\n        written += base.serializeInt(self.req_msg_id, dest[written..]);\n        written += base.serializeInt(self.now, dest[written..]);\n        written += base.serializeInt(self.salts.len, dest[written..]);\n        for (self.salts) |salt| {\n            written += base.serializeInt(salt.valid_since, dest[written..]);\n            written += base.serializeInt(salt.valid_until, dest[written..]);\n            written += base.serializeInt(salt.salt, dest[written..]);\n        }\n        return written;\n    }\n\n    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct { usize, *@This() } {\n        var result = try allocator.create(@This());\n        var read: usize = 0;\n        read += base.deserializeInt(u64, src[read..], &result.req_msg_id);\n        read += base.deserializeInt(u32, src[read..], &result.now);\n\n        const len = base.deserializeInt(u32, src[read..], &read);\n        result.salts = try allocator.alloc(base.FutureSalt, len);\n\n        for (0..len) |i| {\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_since);\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_until);\n            read += base.deserializeInt(u64, src[read..], &result.salts[i].salt);\n        }\n\n        return .{ read, result };\n    }\n};\n");
+        //_ = try file.write("pub const ProtoMessage = struct {\n    msg_id: u64,\n    seqno: i32,\n    body: TL,\n\n    pub fn serializedSize(self: *const @This()) usize {\n        return 16 + self.body.serializedSize();\n    }\n\n    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        var written: usize = 0;\n        written += base.serializeLong(self.msg_id, dest[written..]);\n        written += base.serializeInt(self.seqno, dest[written..]);\n\n        const tlWritten = self.body.serialize(dest[written + 4 ..]);\n\n        written += base.serializeInt(tlWritten, dest[written..]);\n        return written + tlWritten;\n    }\n\n    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct { usize, *@This() } {\n        var result = try allocator.create(@This());\n        var read: usize = 0;\n        read += base.deserializeLong(src[read..], &result.msg_id);\n        read += base.deserializeInt(src[read..], &result.seqno);\n\n        var bodyLength: i32 = undefined;\n        read += base.deserializeInt(src[read..], &bodyLength);\n\n        result.body = try TL.deserialize(allocator, src[read .. read + bodyLength])[1];\n        read += bodyLength;\n\n        return .{ read, result };\n    }\n};");
+        //_ = try file.write("pub const FutureSalts = struct {\n    req_msg_id: u64,\n    now: u32,\n    salts: []const base.FutureSalt,\n\n    pub fn serializedSize(self: *const @This()) usize {\n        return 20 + (self.salts.len * 16);\n    }\n\n    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        var written: usize = 0;\n        written += base.serializeInt(@as(u32, 0xae500895), dest[written..]);\n        written += base.serializeInt(self.req_msg_id, dest[written..]);\n        written += base.serializeInt(self.now, dest[written..]);\n        written += base.serializeInt(self.salts.len, dest[written..]);\n        for (self.salts) |salt| {\n            written += base.serializeInt(salt.valid_since, dest[written..]);\n            written += base.serializeInt(salt.valid_until, dest[written..]);\n            written += base.serializeInt(salt.salt, dest[written..]);\n        }\n        return written;\n    }\n\n    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct { usize, *@This() } {\n        var result = try allocator.create(@This());\n        var read: usize = 0;\n        read += base.deserializeInt(u64, src[read..], &result.req_msg_id);\n        read += base.deserializeInt(u32, src[read..], &result.now);\n\n        const len = base.deserializeInt(u32, src[read..], &read);\n        result.salts = try allocator.alloc(base.FutureSalt, len);\n\n        for (0..len) |i| {\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_since);\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_until);\n            read += base.deserializeInt(u64, src[read..], &result.salts[i].salt);\n        }\n\n        return .{ read, result };\n    }\n};\n");
     }
     _ = allocator.detectLeaks();
 }
