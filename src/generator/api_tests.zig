@@ -7,7 +7,7 @@ test "basic constructor serialize & deserialize" {
 
     {
         var user = api.InputUserSelf{};
-        const constructor = api.IInputUser{ .InputUserSelf = &user };
+        const constructor = api.TL{ .InputUserSelf = &user };
 
         var dest = try allocator.alloc(u8, constructor.serializedSize());
         defer allocator.free(dest);
@@ -79,21 +79,15 @@ test "deserialize constructor with int vector" {
 test "big constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
 
-    var restr = api.RestrictionReason{ .platform = "test", .text = "test", .reason = "reason" };
-
-    var channel = api.PeerChannel{
-        .channel_id = 3543543,
-    };
-
-    var m = api.Message{
+    const constructor = api.IMessage{ .Message = &api.Message{
         .id = 32,
         .message = "asdasd",
-        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &restr }},
-        .peer_id = api.IPeer{ .PeerChannel = &channel },
+        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &api.RestrictionReason{ .platform = "test", .text = "test", .reason = "reason" } }},
+        .peer_id = api.IPeer{ .PeerChannel = &api.PeerChannel{
+            .channel_id = 3543543,
+        } },
         .date = 342432432,
-    };
-
-    const constructor = api.IMessage{ .Message = &m };
+    } };
 
     const size = constructor.serializedSize();
     var dest = try allocator.alloc(u8, size);
@@ -127,9 +121,9 @@ test "big constructor serialize & deserialize" {
                 },
             }
 
-            switch (message.peer_id.?) {
+            switch (message.peer_id) {
                 .PeerChannel => {
-                    const peer_channel = message.peer_id.?.PeerChannel;
+                    const peer_channel = message.peer_id.PeerChannel;
                     try std.testing.expectEqual(3543543, peer_channel.channel_id);
                 },
                 else => unreachable,
@@ -137,4 +131,55 @@ test "big constructor serialize & deserialize" {
         },
         else => unreachable,
     }
+}
+
+test "bong" {
+    const allocator = std.testing.allocator;
+
+    const constructor = api.IMessage{ .Message = &api.Message{
+        .id = 32,
+        .message = "asdasd",
+        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &api.RestrictionReason{ .platform = "test", .text = "test", .reason = "reason" } }},
+        .peer_id = api.IPeer{ .PeerChannel = &api.PeerChannel{
+            .channel_id = 3543543,
+        } },
+        .date = 342432432,
+    } };
+
+    const size = constructor.serializedSize();
+    var dest = try allocator.alloc(u8, size);
+    defer allocator.free(dest);
+
+    const serialized = constructor.serialize(dest);
+
+    var cursor: usize = 0;
+    var ssize: usize = 0;
+    std.debug.print("deserializedsize\n", .{});
+    api.TL.deserializedSize(dest[0..serialized], &cursor, &ssize);
+    std.debug.print("{d}", .{ssize});
+}
+
+test "asd" {
+    const allocator = std.testing.allocator;
+
+    const protorespq = api.ProtoResPQ{ .nonce = 342432423423432423, .pq = "porcod", .server_nonce = 34243424242432321432432, .server_public_key_fingerprints = &[_]i64{ 3, 4, 3 } };
+    var buffer = try allocator.alloc(u8, protorespq.serializedSize());
+    defer allocator.free(buffer);
+    buffer = buffer[0..protorespq.serialize(buffer)];
+
+    var cursor: usize = 0;
+    var deserializedsize: usize = 0;
+
+    api.ProtoResPQ.deserializedSize(buffer[4..], &cursor, &deserializedsize);
+    std.debug.print("des size: {d}\n", .{deserializedsize});
+
+    cursor = 0;
+
+    const bufferDest = try allocator.alloc(u8, deserializedsize);
+    defer allocator.free(bufferDest);
+    const written = api.ProtoResPQ.deserialize2(buffer[4..], bufferDest, &cursor);
+    std.debug.print("written size: {d}\n", .{written});
+
+    const result = @as(*api.ProtoResPQ, @ptrCast(@alignCast(bufferDest)));
+    std.debug.print("written size: {any}\n", .{result.server_public_key_fingerprints});
 }

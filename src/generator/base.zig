@@ -49,6 +49,35 @@ pub fn serializeString(in: []const u8, out: []u8) usize {
     return result;
 }
 
+pub fn strDeserializedSize(src: []const u8, read: *usize) usize {
+    var len: usize = src[0];
+    var lenn: usize = 0;
+
+    if (len >= 254) {
+        read.* += 4;
+        lenn += 4;
+        var actualLen: [4]u8 = undefined;
+
+        @memcpy((&actualLen)[0..3], src[1..4]);
+        actualLen[3] = 0;
+        len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
+    } else {
+        read.* += 1;
+        lenn += 1;
+    }
+
+    read.* += len;
+
+    lenn += len;
+
+    while (lenn % 4 != 0) {
+        read.* += 1;
+        lenn += 1;
+    }
+
+    return len;
+}
+
 pub fn serializeInt(in: anytype, out: []u8) usize {
     const in_ty: @TypeOf(in) = in;
     switch (@TypeOf(in_ty)) {
@@ -100,7 +129,7 @@ pub fn deserializeString(allocator: std.mem.Allocator, src: []const u8, dest: *[
 
         @memcpy((&actualLen)[0..3], src[1..4]);
         actualLen[3] = 0;
-        
+
         len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
         dest.* = try allocator.alloc(u8, len);
         @memcpy(@constCast(dest.*), src[4 .. 4 + len]);
@@ -117,6 +146,45 @@ pub fn deserializeString(allocator: std.mem.Allocator, src: []const u8, dest: *[
     }
 
     return read;
+}
+
+pub fn deserializeString2(src: []const u8, dest: *[]const u8) usize {
+    var read: usize = 0;
+    var len: usize = src[0];
+    if (len >= 254) {
+        read += 4;
+        var actualLen: [4]u8 = undefined;
+
+        @memcpy((&actualLen)[0..3], src[1..4]);
+        actualLen[3] = 0;
+
+        len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
+        dest.* = dest.*[0..len];
+        @memcpy(@constCast(dest.*), src[4 .. 4 + len]);
+    } else {
+        read += 1;
+        dest.* = dest.*[0..len];
+        @memcpy(@constCast(dest.*), src[1 .. 1 + len]);
+    }
+    read += len;
+
+    while (read % 4 != 0) {
+        std.debug.assert(src[read] == 0);
+        read += 1;
+    }
+
+    return read;
+}
+
+/// Calculates how many bytes are needed to align a pointer
+pub fn ensureAligned(in: usize, align_n: usize) usize {
+    var result: usize = 0;
+
+    while ((in + result) % align_n != 0) {
+        result += 1;
+    }
+
+    return result;
 }
 
 test "serialize string" {

@@ -19,7 +19,6 @@ fn parseFile(allocator: std.mem.Allocator, definitions: *std.ArrayList(construct
 
     var iterator = try parser.TlIterator.init(allocator, data);
     defer iterator.deinit();
-
     while (try iterator.next()) |constructor| {
         try definitions.append(constructor);
     }
@@ -44,6 +43,26 @@ fn findLayer(filename: []const u8) !?i32 {
         }
     }
     return null;
+}
+
+fn tlPrimitiveName(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "int")) {
+        return "i32";
+    } else if (std.mem.eql(u8, name, "long")) {
+        return "i64";
+    } else if (std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) {
+        return "[]const u8";
+    } else if (std.mem.eql(u8, name, "double")) {
+        return "f64";
+    } else if (std.mem.eql(u8, name, "int128")) {
+        return "i128";
+    } else if (std.mem.eql(u8, name, "int256")) {
+        return "i256";
+    } else if (std.mem.eql(u8, name, "Bool")) {
+        return "bool";
+    } else {
+        return null;
+    }
 }
 
 fn normalizeNameAlloc(allocator: std.mem.Allocator, def: *const types.TLType, mtproto: bool) ![]const u8 {
@@ -128,9 +147,9 @@ fn tlGenIdEnum(writer: std.io.AnyWriter, definitions: *const std.ArrayList(const
     _ = try writer.write("    BoolFalse = 0xBC799737,\n");
     _ = try writer.write("    MessageContainer = 0x73F1F8DC,\n");
     _ = try writer.write("    FutureSalts = 0xAE500895,\n");
-    _ = try writer.write("    RPCResult = 0xF35C6D01,\n");
-    _ = try writer.write("    Vector = 0xF35C6D01,\n");
-    _ = try writer.write("    GZipPacked = 0x3072CFA1,\n");
+    _ = try writer.write("    RPCResult = 0xf35c6d01,\n");
+    _ = try writer.write("    Vector = 0x1cb5c415,\n");
+    _ = try writer.write("    GZipPacked = 0x3072cfa1,\n");
     _ = try writer.write("    Int = 4,\n");
     _ = try writer.write("    Long = 8,\n");
 
@@ -200,12 +219,8 @@ fn generateFieldType(allocator: std.mem.Allocator, field: TLParameterType, mtpro
                 const normalized = try normalizeNameAlloc(allocator, field.Normal.type, mtproto);
                 defer allocator.free(normalized);
 
-                //result = try concat(allocator, result, "*const ");
-                if (field.Normal.flag != null or field.Normal.type.generic_arg != null) {
-                    result = try concat(allocator, result, "I");
-                } else {
-                    result = try concat(allocator, result, "?I");
-                }
+                result = try concat(allocator, result, "I");
+
                 result = try concat(allocator, result, normalized);
             }
 
@@ -245,7 +260,8 @@ fn generateDefinition(allocator: std.mem.Allocator, writer: std.io.AnyWriter, de
         _ = try writer.print("    {s}: {s},\n", .{ name, typeName });
     }
 
-    _ = try generateSizeFn(allocator, def, writer);
+    _ = try generateSerializedSizeFn(allocator, def, writer);
+    _ = try generateDeserializedSizeFn(allocator, def, writer, mtproto);
     _ = try generateSerializeFn(allocator, def, writer);
     _ = try generateDeserializeFn(allocator, def, writer);
     _ = try generateDeinitFn(allocator, def, writer);
@@ -265,32 +281,32 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
 
     for (mtproto_definitions.items) |def| {
         _ = try normalizeName(writer, def, true);
-        _ = try writer.write(": * ");
+        _ = try writer.write(": *const ");
         _ = try normalizeName(writer, def, true);
         _ = try writer.write(",\n");
     }
 
     for (definitions.items) |def| {
         _ = try normalizeName(writer, def, false);
-        _ = try writer.write(": * ");
+        _ = try writer.write(": *const ");
         _ = try normalizeName(writer, def, false);
         _ = try writer.write(",\n");
     }
 
     // hardcoded ids
-    _ = try writer.write("    BoolTrue: true,\n");
-    _ = try writer.write("    BoolFalse: false,\n");
-    _ = try writer.write("    MessageContainer: *MessageContainer,\n");
-    _ = try writer.write("    FutureSalts: *FutureSalts,\n");
-    _ = try writer.write("    RPCResult: *RPCResult,\n");
-    _ = try writer.write("    Vector: *Vector,\n");
-    _ = try writer.write("    GZipPacked: unreachable,\n");
+    _ = try writer.write("    BoolTrue: bool,\n");
+    _ = try writer.write("    BoolFalse: bool,\n");
+    _ = try writer.write("    MessageContainer: *const SmsjobsFinishJob,\n");
+    _ = try writer.write("    FutureSalts: *const SmsjobsFinishJob,\n");
+    _ = try writer.write("    RPCResult: *const SmsjobsFinishJob,\n");
+    _ = try writer.write("    Vector: *const SmsjobsFinishJob,\n");
+    _ = try writer.write("    GZipPacked: *const SmsjobsFinishJob,\n");
     _ = try writer.write("    Int: i32,\n");
     _ = try writer.write("    Long: i64,\n");
 
-    _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n        switch (self.*) {\n        inline else => |x| x.serializedSize(),\n        }\n    }\n");
+    _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n        @setEvalBranchQuota(1000000);\n        switch (self.*) {\n        .BoolTrue, .BoolFalse, .Int => return 4,\n        .Long => return 8,\n        inline else => |x| return x.serializedSize(),\n        }\n    }\n");
 
-    _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        switch (self.*) {\n        inline else => |x| x.serialize(dest),\n        }\n    }\n");
+    _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        @setEvalBranchQuota(1000000);\n        switch (self.*) {\n        .BoolTrue => return base.serializeInt(@as(u32, 0x997275b5), dest),\n        .BoolFalse => return base.serializeInt(@as(u32, 0xbc799737), dest),\n        .Int => |x| return base.serializeInt(x, dest),\n        .Long => |x| return base.serializeInt(x, dest),\n        inline else => |x| return x.serialize(dest),\n        }\n    }\n");
 
     //    _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
 
@@ -303,6 +319,66 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
     //    }
     //    _ = try writer.write("        }\n");
     //    _ = try writer.write("    }\n");
+
+    /////
+
+    _ = try writer.write("    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct {usize, TL} {\n");
+
+    _ = try writer.write("        const id = std.mem.readInt(u32, src[0..4], std.builtin.Endian.little);\n");
+    //        switch (@as(ChatEnumID, @enumFromInt(id))) {
+    _ = try writer.write("        switch (@as(TLID, @enumFromInt(id))) {\n");
+
+    for (mtproto_definitions.items) |def| {
+        _ = try writer.write("            .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => {\n                const deserialized = try Proto");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(".deserialize(allocator, src[4..]);\n");
+        _ = try writer.write("                return .{ deserialized[0] + 4, .{ .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" = deserialized[1] } };\n            },\n");
+    }
+
+    for (definitions.items) |def| {
+        _ = try writer.write("            .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => {\n                const deserialized = try ");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(".deserialize(allocator, src[4..]);\n");
+        _ = try writer.write("                return .{ deserialized[0] + 4, .{ .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" = deserialized[1] } };\n            },\n");
+    }
+
+    _ = try writer.write("        }\n");
+    _ = try writer.write("    }\n");
+
+    //////
+
+    _ = try writer.write("    pub fn deserializedSize(src: []const u8, cursor: *usize, size: *usize) void {\n");
+
+    _ = try writer.write("        const id = std.mem.readInt(u32, @ptrCast(src[cursor.*..cursor.*+4]), std.builtin.Endian.little);\n        cursor.* += 4;\n");
+    //        switch (@as(ChatEnumID, @enumFromInt(id))) {
+    _ = try writer.write("        switch (@as(TLID, @enumFromInt(id))) {\n");
+
+    for (mtproto_definitions.items) |def| {
+        _ = try writer.write("            .Proto");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => {\n                Proto");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(".deserializedSize(src, cursor, size);\n            },\n");
+    }
+
+    for (definitions.items) |def| {
+        _ = try writer.write("            .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => {\n                return ");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(".deserializedSize(src, cursor, size);\n            },\n");
+    }
+
+    _ = try writer.write("            else => unreachable,\n        }\n");
+    _ = try writer.write("    }\n");
 
     _ = try writer.write("};\n");
 }
@@ -440,16 +516,7 @@ fn generateDeinitFn(allocator: std.mem.Allocator, def: *const constructors.TLCon
                     if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
                         _ = try writer.print("        allocator.free({s});\n", .{param_name});
                     } else {
-                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
-                            _ = try writer.print("          if ({s}) |{s}defined| {{\n", .{ param_name, param_name });
-                            param_name = try concat(allocator, param_name, "defined");
-                        }
-
                         _ = try writer.print("        {s}.deinit(allocator);\n", .{param_name});
-
-                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
-                            _ = try writer.write("          }\n");
-                        }
                     }
                 } else {
                     _ = try writer.print("        _ = {s};\n", .{param_name});
@@ -472,6 +539,16 @@ fn generateDeinitFn(allocator: std.mem.Allocator, def: *const constructors.TLCon
     }
 
     _ = try writer.write("\n    }\n");
+}
+
+fn generateDeserializeNewFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    _ = try writer.write("    pub fn deserialize(src: []const u8, dest: []u8) void {\n");
+    if (def.params.items.len == 0) {
+        _ = try writer.write("        _ = src;\n        _ = dest;\n");
+        return;
+    }
+    _ = allocator;
+    _ = try writer.print("        var result = @as(*{s}, @ptrCast())\n        var read: usize = 0;\n");
 }
 
 fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
@@ -545,11 +622,7 @@ fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.
                 } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                     _ = try writer.print("        {s} = base.deserializeBool(src[read..], &read);\n", .{param_name});
                 } else {
-                    var mustOptional: []const u8 = "";
-                    if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
-                        mustOptional = ".?";
-                    }
-                    _ = try writer.print("        {{ const deserialized = try @TypeOf({s}{s}).deserialize(allocator, src[read..]); read += deserialized[0]; {s} = deserialized[1]; errdefer {s}{s}.deinit(); }}\n", .{ param_name, mustOptional, param_name, param_name, mustOptional });
+                    _ = try writer.print("        {{ const deserialized = try @TypeOf({s}).deserialize(allocator, src[read..]); read += deserialized[0]; {s} = deserialized[1]; errdefer {s}.deinit(); }}\n", .{ param_name, param_name, param_name });
                 }
 
                 generic_arg = param.type.?.Normal.type.generic_arg;
@@ -640,11 +713,7 @@ fn generateSerializeFn(allocator: std.mem.Allocator, def: *const constructors.TL
                 } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                     _ = try writer.print("        written += base.serializeInt(if ({s}) @as(u32, 0x997275b5) else @as(u32, 0xbc799737), dest[written..]);\n", .{paramName});
                 } else {
-                    var mustOptional: []const u8 = "";
-                    if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
-                        mustOptional = ".?";
-                    }
-                    _ = try writer.print("        written += {s}{s}.serialize(dest[written..]);\n", .{ paramName, mustOptional });
+                    _ = try writer.print("        written += {s}.serialize(dest[written..]);\n", .{paramName});
                 }
 
                 generic_arg = param.type.?.Normal.type.generic_arg;
@@ -668,7 +737,106 @@ fn generateSerializeFn(allocator: std.mem.Allocator, def: *const constructors.TL
     _ = try writer.write("        return written;\n    }\n");
 }
 
-fn generateSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+fn generateDeserializedSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter, mtproto: bool) !void {
+    _ = try writer.write("    pub fn deserializedSize(src: []const u8, cursor: *usize, size: *usize) void {\n");
+    if (def.params.items.len == 0) {
+        _ = try writer.write("        _ = src; _ = cursor; \n        size.* += base.ensureAligned(size.*, @alignOf(@This()));\n        size.* += @sizeOf(@This());\n    }");
+        return;
+    }
+
+    _ = try writer.write("\n        size.* += base.ensureAligned(size.*, @alignOf(@This()));\n        size.* += @sizeOf(@This());\n");
+    var srcUsed = false;
+    var sizeMutated = true;
+
+    for (def.params.items) |param| {
+        if (param.type_def) {
+            _ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+            continue;
+        }
+        switch (param.type.?) {
+            .Flags => {
+                srcUsed = true;
+                _ = try writer.print("        var flag_{s}: usize = 0;\n        cursor.* += base.deserializeInt(usize, src[cursor.*..], &flag_{s});\n", .{ param.name, param.name });
+            },
+            .Normal => {
+                if (param.type.?.Normal.flag != null and std.mem.eql(u8, param.type.?.Normal.type.name, "true")) {
+                    _ = try writer.print("        // true flag\n\n", .{});
+                    continue;
+                }
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.print("        if ((flag_{s} & (1 << {d})) != 0) {{\n", .{ param.type.?.Normal.flag.?.name, param.type.?.Normal.flag.?.index });
+                }
+
+                if (param.type.?.Normal.type.generic_arg) |generic_arg| {
+                    // TODO: Maybe implement multidimensional vectors support. Telegram has never added them into the TL scheme for over 10+ years, so I don't bother right now.
+                    if (generic_arg.generic_arg != null) {
+                        return GenerateFieldTypeError.UnsupportedGenericArg;
+                    }
+                    srcUsed = true;
+                    sizeMutated = true;
+                    _ = try writer.print("        {{\n           const len = base.vectorLen(src[cursor.*..], cursor);\n", .{});
+
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.write("        for (0..len) |_| {\n          size.* += base.strDeserializedSize(src[cursor.*..], cursor);\n        }");
+                    } else if (tlPrimitiveName(param.type.?.Normal.type.name)) |primitive| {
+                        if (std.mem.eql(u8, primitive, "bool")) {
+                            _ = try writer.print("        size.* += len * @sizeOf({s});\n        cursor.* += len * 4;\n", .{primitive});
+                        } else {
+                            _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf({s}));\n        size.* += len * @sizeOf({s});\n        cursor.* += len * @sizeOf({s});\n", .{ primitive, primitive, primitive });
+                        }
+                    } else {
+                        const normalized = try normalizeNameAlloc(allocator, param.type.?.Normal.type, mtproto);
+                        defer allocator.free(normalized);
+                        _ = try writer.print("        for (0..len) |_| {{\n          I{s}.deserializedSize(src, cursor, size);\n        }}", .{normalized});
+                    }
+
+                    _ = try writer.write("        }");
+                } else {
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        srcUsed = true;
+                        sizeMutated = true;
+                        _ = try writer.write("          size.* += base.strDeserializedSize(src[cursor.*..], cursor);");
+                    } else if (tlPrimitiveName(param.type.?.Normal.type.name)) |primitive| {
+                        if (std.mem.eql(u8, primitive, "bool")) {
+                            _ = try writer.print("        cursor.* += 4;", .{});
+                        } else {
+                            _ = try writer.print("        cursor.* += @sizeOf({s});\n", .{primitive});
+                        }
+                    } else {
+                        srcUsed = true;
+                        sizeMutated = true;
+                        if (param.type.?.Normal.type.generic_ref) {
+                            _ = try writer.print("          TL.deserializedSize(src, cursor, size);", .{});
+                        } else {
+                            const normalized = try normalizeNameAlloc(allocator, param.type.?.Normal.type, mtproto);
+                            defer allocator.free(normalized);
+                            _ = try writer.print("          I{s}.deserializedSize(src, cursor, size);", .{normalized});
+                        }
+                    }
+                }
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.write("        }");
+                }
+            },
+        }
+
+        _ = try writer.write("\n");
+    }
+
+    if (!srcUsed) {
+        _ = try writer.write("        _ = src;\n");
+    }
+
+    if (!sizeMutated) {
+        _ = try writer.write("        size = size;\n");
+    }
+
+    _ = try writer.write("        \n    }\n");
+}
+
+fn generateSerializedSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
     _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n");
     if (def.params.items.len == 0) {
         _ = try writer.write("        _ = self;\n        return 4;\n    }");
@@ -724,11 +892,7 @@ fn generateSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConst
                     } else if (std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                         _ = try writer.print("        _ = {s};\n        result += 4;", .{paramName});
                     } else {
-                        var mustOptional: []const u8 = "";
-                        if (param.type.?.Normal.flag == null and param.type.?.Normal.type.generic_arg == null) {
-                            mustOptional = ".?";
-                        }
-                        _ = try writer.print("        result += {s}{s}.serializedSize();\n", .{ paramName, mustOptional });
+                        _ = try writer.print("        result += {s}.serializedSize();\n", .{paramName});
                     }
                     usedSelf = true;
                     generic_arg = param.type.?.Normal.type.generic_arg;
@@ -797,7 +961,7 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
         for (ty.value_ptr.items) |def| {
             _ = try writer.write("    ");
             _ = try normalizeName(writer, def, false);
-            _ = try writer.write(": * ");
+            _ = try writer.write(": *const ");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(",\n");
         }
@@ -857,6 +1021,27 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
             _ = try writer.write("                return .{ deserialized[0] + 4, .{ .");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(" = deserialized[1] } };\n            },\n");
+        }
+
+        _ = try writer.write("        }\n");
+        _ = try writer.write("    }\n");
+
+        //pub fn deserializedSize(src: []const u8, cursor: *usize) usize {
+
+        _ = try writer.write("    pub fn deserializedSize(src: []const u8, cursor: *usize, size: *usize) void {\n");
+
+        _ = try writer.write("        const id = std.mem.readInt(u32, @ptrCast(src[cursor.*..cursor.*+4]), std.builtin.Endian.little);\n        cursor.* += 4;");
+        //        switch (@as(ChatEnumID, @enumFromInt(id))) {
+        _ = try writer.write("        switch (@as(");
+        _ = try normalizeName(writer, ty.value_ptr.items[0].type, false);
+        _ = try writer.write("EnumID, @enumFromInt(id))) {\n");
+
+        for (ty.value_ptr.items) |def| {
+            _ = try writer.write("            .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" => {\n                ");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(".deserializedSize(src, cursor, size);\n            },\n");
         }
 
         _ = try writer.write("        }\n");
