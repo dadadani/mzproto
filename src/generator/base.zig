@@ -311,7 +311,7 @@ pub fn unwrapType(comptime T: type) type {
             return @typeInfo(T).pointer.child;
         },
         else => {
-            @compileError("Unsupported type");
+            return T;
         },
     }
 }
