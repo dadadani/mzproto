@@ -153,9 +153,9 @@ test "big constructor serialize & deserialize" {
             switch (message.restriction_reason.?[0]) {
                 .RestrictionReason => {
                     const restriction_reason = message.restriction_reason.?[0].RestrictionReason;
-                    std.debug.print("restriction_reason.platform = {any} -or- {s}\n", .{ restriction_reason.platform, restriction_reason.platform });
-                    std.debug.print("restriction_reason.reason = {any} -or- {s} -len- {d}\n", .{ restriction_reason.reason, restriction_reason.reason, restriction_reason.reason.len });
-                    std.debug.print("restriction_reason.text = {any} -or- {s} -len- {d}\n", .{ restriction_reason.text, restriction_reason.text, restriction_reason.text.len });
+                    try std.testing.expectEqualStrings("platform", restriction_reason.platform);
+                    try std.testing.expectEqualStrings("reason", restriction_reason.reason);
+                    try std.testing.expectEqualStrings("text", restriction_reason.text);
                 },
             }
 
