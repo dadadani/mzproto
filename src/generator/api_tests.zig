@@ -273,3 +273,45 @@ test "Vector long deserialization" {
         else => unreachable,
     }
 }
+
+test "Dynamic constructor" {
+    const constructor = api.InvokeWithLayer{ .layer = 149, .query = api.TL{ .InvokeWithTakeout = &api.InvokeWithTakeout{ .takeout_id = 45, .query = .{ .InputUserSelf = &api.InputUserSelf{} } } } };
+
+    var sbuf = try std.testing.allocator.alloc(u8, constructor.serializedSize());
+    defer std.testing.allocator.free(sbuf);
+
+    var written = constructor.serialize(sbuf);
+
+    sbuf = sbuf[0..written];
+
+    var cursor: usize = 0;
+    written = 0;
+
+    api.TL.deserializedSize(sbuf, &cursor, &written);
+
+    const dbuf = try std.testing.allocator.alloc(u8, written);
+    defer std.testing.allocator.free(dbuf);
+
+    cursor = 0;
+    written = 0;
+
+    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+
+    switch (deserialized) {
+        .InvokeWithLayer => |x| {
+            try std.testing.expectEqual(149, x.layer);
+
+            switch (x.query) {
+                .InvokeWithTakeout => |xx| {
+                    try std.testing.expectEqual(45, xx.takeout_id);
+                    switch (xx.query) {
+                        .InputUserSelf => {},
+                        else => unreachable,
+                    }
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
