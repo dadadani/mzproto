@@ -22,8 +22,6 @@ test "basic constructor serialize & deserialize" {
         const deserializeBuffer = try allocator.alloc(u8, written);
         defer allocator.free(deserializeBuffer);
 
-        std.debug.print("allocated deserializebuffer: {d}", .{written});
-
         cursor = 0;
         written = 0;
 
@@ -128,7 +126,7 @@ test "big constructor serialize & deserialize" {
     var cursor: usize = 0;
     var written: usize = 0;
 
-    api.IMessage.deserializedSize(dest, &cursor, &written);
+    api.TL.deserializedSize(dest, &cursor, &written);
 
     const deserializeBuffer = try std.testing.allocator.alloc(u8, written);
     defer std.testing.allocator.free(deserializeBuffer);
@@ -136,15 +134,12 @@ test "big constructor serialize & deserialize" {
     cursor = 0;
     written = 0;
 
-    const deserialized = api.IMessage.deserialize(dest, deserializeBuffer, &cursor, &written);
+    const deserialized = api.TL.deserialize(dest, deserializeBuffer, &cursor, &written);
 
     switch (deserialized) {
         .Message => {
             const message = deserialized.Message;
 
-            if (message.from_id) |mm| {
-                std.debug.print("la fin {any}", .{mm});
-            }
             try std.testing.expectEqual(32, message.id);
             try std.testing.expectEqualStrings("asdasd", message.message);
             try std.testing.expectEqual(342432432, message.date);
@@ -167,6 +162,114 @@ test "big constructor serialize & deserialize" {
                 else => unreachable,
             }
         },
+        else => unreachable,
+    }
+}
+
+test "MessageContainer serialization & deserialization" {
+    const container = api.MessageContainer{ .messages = &[_]api.ProtoMessage{api.ProtoMessage{ .body = api.TL{ .InputPeerSelf = &api.InputPeerSelf{} }, .msg_id = 342423423543534, .seqno = 23 }} };
+
+    var sbuf = try std.testing.allocator.alloc(u8, container.serializedSize());
+    defer std.testing.allocator.free(sbuf);
+
+    var written = container.serialize(sbuf);
+
+    sbuf = sbuf[0..written];
+
+    var cursor: usize = 0;
+    written = 0;
+
+    api.TL.deserializedSize(sbuf, &cursor, &written);
+
+    const dbuf = try std.testing.allocator.alloc(u8, written);
+    defer std.testing.allocator.free(dbuf);
+
+    cursor = 0;
+    written = 0;
+
+    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+
+    switch (deserialized) {
+        .MessageContainer => |x| {
+            try std.testing.expectEqual(342423423543534, x.messages[0].msg_id);
+            try std.testing.expectEqual(23, x.messages[0].seqno);
+
+            switch (x.messages[0].body) {
+                .InputPeerSelf => {},
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+test "RPCResult serialization & deserialization" {
+    const constructor = api.RPCResult{ .body = api.TL{ .ImportedContact = &api.ImportedContact{ .user_id = 432423423, .client_id = 342432432 } }, .req_msg_id = 929437432873425453 };
+
+    var sbuf = try std.testing.allocator.alloc(u8, constructor.serializedSize());
+    defer std.testing.allocator.free(sbuf);
+
+    var written = constructor.serialize(sbuf);
+
+    sbuf = sbuf[0..written];
+
+    var cursor: usize = 0;
+    written = 0;
+
+    api.TL.deserializedSize(sbuf, &cursor, &written);
+
+    const dbuf = try std.testing.allocator.alloc(u8, written);
+    defer std.testing.allocator.free(dbuf);
+
+    cursor = 0;
+    written = 0;
+
+    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+
+    switch (deserialized) {
+        .RPCResult => |x| {
+            try std.testing.expectEqual(929437432873425453, x.req_msg_id);
+
+            switch (x.body) {
+                .ImportedContact => |xx| {
+                    try std.testing.expectEqual(342432432, xx.client_id);
+                    try std.testing.expectEqual(432423423, xx.user_id);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+test "Vector long deserialization" {
+
+    // I haven't implement a "serialize" function for the vector type, so we do the worst hack possible
+
+    const baseob = api.ProtoResPQ{ .nonce = 0, .pq = "", .server_nonce = 0, .server_public_key_fingerprints = &[_]i64{ 432423342, 45346, 897225, 4543 } };
+
+    var sbuf = try std.testing.allocator.alloc(u8, baseob.serializedSize());
+    defer std.testing.allocator.free(sbuf);
+
+    var written = baseob.serialize(sbuf);
+
+    const xsbuf = sbuf[4 + 36 .. written];
+
+    written = 0;
+    var cursor: usize = 0;
+
+    api.TL.deserializedSize(xsbuf, &cursor, &written);
+
+    const dbuf = try std.testing.allocator.alloc(u8, written);
+    defer std.testing.allocator.free(dbuf);
+
+    written = 0;
+    cursor = 0;
+
+    const deserialized = api.TL.deserialize(xsbuf, dbuf, &cursor, &written);
+
+    switch (deserialized) {
+        .Vector => {},
         else => unreachable,
     }
 }

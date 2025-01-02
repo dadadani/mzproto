@@ -46,7 +46,7 @@ new_session_created#9ec20908 first_msg_id:long unique_id:long server_salt:long =
 //message msg_id:long seqno:int bytes:int body:Object = Message;
 //msg_copy#e06046b2 orig_message:Message = MessageCopy;
 
-//gzip_packed#3072cfa1 packed_data:bytes = Object;
+gzip_packed#3072cfa1 packed_data:bytes = GZipPacked;
 
 msgs_ack#62d6b459 msg_ids:Vector<long> = MsgsAck;
 
