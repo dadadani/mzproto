@@ -27,6 +27,12 @@ test "basic constructor serialize & deserialize" {
 
         const deserialized = api.IInputUser.deserialize(dest, deserializeBuffer, &cursor, &written);
 
+        var writtenAgain: usize = 0;
+
+        deserialized.cloneSize(&writtenAgain);
+
+        try std.testing.expectEqual(written, writtenAgain);
+
         switch (deserialized) {
             .InputUserSelf => {},
             else => unreachable,
@@ -61,6 +67,12 @@ test "basic constructor with some fields serialize & deserialize" {
         written = 0;
         const deserialized = api.IInputFile.deserialize(dest, deserializeBuffer, &cursor, &written);
 
+        var writtenAgain: usize = 0;
+
+        deserialized.cloneSize(&writtenAgain);
+
+        try std.testing.expectEqual(written, writtenAgain);
+
         switch (deserialized) {
             .InputFile => {
                 const input_file = deserialized.InputFile;
@@ -91,6 +103,12 @@ test "deserialize constructor with int vector" {
     const deserialized = api.IVideoSize.deserialize(&data, deserializeBuffer, &cursor, &written);
 
     try std.testing.expectEqual(data.len, cursor);
+
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
 
     switch (deserialized) {
         .VideoSizeEmojiMarkup => {
@@ -135,6 +153,12 @@ test "big constructor serialize & deserialize" {
     written = 0;
 
     const deserialized = api.TL.deserialize(dest, deserializeBuffer, &cursor, &written);
+
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
 
     switch (deserialized) {
         .Message => {
@@ -189,6 +213,12 @@ test "MessageContainer serialization & deserialization" {
 
     const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
 
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
     switch (deserialized) {
         .MessageContainer => |x| {
             try std.testing.expectEqual(342423423543534, x.messages[0].msg_id);
@@ -225,6 +255,12 @@ test "RPCResult serialization & deserialization" {
     written = 0;
 
     const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
 
     switch (deserialized) {
         .RPCResult => |x| {
@@ -268,6 +304,12 @@ test "Vector long deserialization" {
 
     const deserialized = api.TL.deserialize(xsbuf, dbuf, &cursor, &written);
 
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
     switch (deserialized) {
         .Vector => {},
         else => unreachable,
@@ -297,6 +339,12 @@ test "Dynamic constructor" {
 
     const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
 
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
     switch (deserialized) {
         .InvokeWithLayer => |x| {
             try std.testing.expectEqual(149, x.layer);
@@ -311,6 +359,107 @@ test "Dynamic constructor" {
                 },
                 else => unreachable,
             }
+        },
+        else => unreachable,
+    }
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+    writtenAgain = 0;
+
+    const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (clone) {
+        .InvokeWithLayer => |x| {
+            try std.testing.expectEqual(149, x.layer);
+
+            switch (x.query) {
+                .InvokeWithTakeout => |xx| {
+                    try std.testing.expectEqual(45, xx.takeout_id);
+                    switch (xx.query) {
+                        .InputUserSelf => {},
+                        else => unreachable,
+                    }
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+test "asdadsadsa" {
+    const baseob = api.ProtoResPQ{ .nonce = 0, .pq = "", .server_nonce = 0, .server_public_key_fingerprints = &[_]i64{ 432423342, 45346, 897225, 4543 } };
+
+    var size: usize = 0;
+
+    baseob.cloneSize(&size);
+
+    const buf = try std.testing.allocator.alloc(u8, size);
+    defer std.testing.allocator.free(buf);
+    size = 0;
+
+    const r = baseob.clone(buf, &size);
+
+    try std.testing.expectEqualStrings(baseob.pq, r.pq);
+}
+
+test "vectors of strings" {
+    const obj = api.ChannelAdminLogEventActionChangeUsernames{ .prev_value = &[_][]const u8{"test"}, .new_value = &[_][]const u8{ "test2", "hieveryone!!!!!!!!!!" } };
+
+    var sbuf = try std.testing.allocator.alloc(u8, obj.serializedSize());
+    defer std.testing.allocator.free(sbuf);
+
+    var written = obj.serialize(sbuf);
+
+    sbuf = sbuf[0..written];
+
+    var cursor: usize = 0;
+
+    written = 0;
+
+    api.TL.deserializedSize(sbuf, &cursor, &written);
+
+    const dbuf = try std.testing.allocator.alloc(u8, written);
+    defer std.testing.allocator.free(dbuf);
+
+    cursor = 0;
+
+    written = 0;
+
+    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+
+    switch (deserialized) {
+        .ChannelAdminLogEventActionChangeUsernames => |x| {
+            try std.testing.expectEqualStrings("test", x.prev_value[0]);
+            try std.testing.expectEqualStrings("test2", x.new_value[0]);
+            try std.testing.expectEqualStrings("hieveryone!!!!!!!!!!", x.new_value[1]);
+        },
+        else => unreachable,
+    }
+
+    var writtenAgain: usize = 0;
+
+    deserialized.cloneSize(&writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+
+    writtenAgain = 0;
+
+    const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (clone) {
+        .ChannelAdminLogEventActionChangeUsernames => |x| {
+            try std.testing.expectEqualStrings("test", x.prev_value[0]);
+            try std.testing.expectEqualStrings("test2", x.new_value[0]);
+            try std.testing.expectEqualStrings("hieveryone!!!!!!!!!!", x.new_value[1]);
         },
         else => unreachable,
     }

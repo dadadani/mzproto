@@ -263,6 +263,8 @@ fn generateDefinition(allocator: std.mem.Allocator, writer: std.io.AnyWriter, de
     _ = try generateDeserializedSizeFn(allocator, def, writer, mtproto);
     _ = try generateSerializeFn(allocator, def, writer);
     _ = try generateDeserializeFn(allocator, def, writer);
+    _ = try generateSizeFn(allocator, def, writer);
+    _ = try generateCloneFn(allocator, def, writer);
     _ = try writer.write("};\n");
 }
 
@@ -300,6 +302,30 @@ fn tlGenBaseUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, defini
     _ = try writer.write("    Vector: *const base.Vector(TL),\n");
     _ = try writer.write("    Int: i32,\n");
     _ = try writer.write("    Long: i64,\n");
+
+    _ = try writer.write("    pub fn cloneSize(self: *const @This(), size: *usize) void {\n        @setEvalBranchQuota(1000000);\n        switch (self.*) {\n        .BoolTrue, .BoolFalse, .Int => return,\n        .Long => return,\n        inline else => |x| x.cloneSize(size),\n        }\n    }\n");
+
+    _ = try writer.write("    pub fn clone(self: *const @This(), dest: []u8, size: *usize) TL {\n        @setEvalBranchQuota(1000000);\n        switch (self.*) {\n            .BoolTrue, .BoolFalse, .Int, .Long => return self.*,\n            .MessageContainer => |x| {\n                return .{ .MessageContainer = x.clone(dest, size) };\n            },\n            .FutureSalts => |x| {\n                return .{ .FutureSalts = x.clone(dest, size) };\n            },\n            .RPCResult => |x| {\n                return .{ .RPCResult = x.clone(dest, size) };\n            },\n            .Vector => |x| {\n                return .{ .Vector = x.clone(dest, size) };\n            },\n");
+
+    for (mtproto_definitions.items) |def| {
+        _ = try writer.write("            .");
+        _ = try normalizeName(writer, def, true);
+        _ = try writer.write(" => |x| {\n");
+        _ = try writer.write("                return .{ .");
+        _ = try normalizeName(writer, def, true);
+        _ = try writer.write(" = x.clone(dest, size) };\n            },\n");
+    }
+
+    for (definitions.items) |def| {
+        _ = try writer.write("            .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" => |x| {\n");
+        _ = try writer.write("                return .{ .");
+        _ = try normalizeName(writer, def, false);
+        _ = try writer.write(" = x.clone(dest, size) };\n            },\n");
+    }
+
+    _ = try writer.write("        }\n    }\n");
 
     _ = try writer.write("    pub fn serializedSize(self: *const @This()) usize {\n        @setEvalBranchQuota(1000000);\n        switch (self.*) {\n        .BoolTrue, .BoolFalse, .Int => return 4,\n        .Long => return 8,\n        inline else => |x| return x.serializedSize(),\n        }\n    }\n");
 
@@ -471,8 +497,6 @@ fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.
             continue;
         }
 
-        //var resultMutated = false;
-
         switch (param.type.?) {
             .Flags => {
                 _ = try writer.print("        var flag_{s}: usize = 0;\n        cursor.* += base.deserializeInt(usize, src[cursor.*..], &flag_{s});\n", .{ param.name, param.name });
@@ -509,7 +533,7 @@ fn generateDeserializeFn(allocator: std.mem.Allocator, def: *const constructors.
                     }
                     _ = try writer.print("        {{\n          const len = base.vectorLen(src[cursor.*..], cursor);\n", .{});
 
-                    if (!(std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes") or std.mem.eql(u8, param.type.?.Normal.type.name, "Bool"))) {
+                    if (!std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
                         _ = try writer.print("        written.* += base.ensureAligned(written.*, @alignOf(@TypeOf({s})));\n", .{param_name});
                     }
 
@@ -682,7 +706,7 @@ fn generateDeserializedSizeFn(allocator: std.mem.Allocator, def: *const construc
                     _ = try writer.print("        {{\n           const len = base.vectorLen(src[cursor.*..], cursor);\n", .{});
 
                     if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
-                        _ = try writer.write("        for (0..len) |_| {\n          size.* += base.strDeserializedSize(src[cursor.*..], cursor);\n        }");
+                        _ = try writer.write("        size.* += base.ensureAligned(size.*, @alignOf([]const []const u8));\n        size.* += len * @sizeOf([]const u8);\n        for (0..len) |_| {\n          size.* += base.strDeserializedSize(src[cursor.*..], cursor);\n        }");
                     } else if (tlPrimitiveName(param.type.?.Normal.type.name)) |primitive| {
                         if (std.mem.eql(u8, primitive, "bool")) {
                             _ = try writer.print("        size.* += len * @sizeOf({s});\n        cursor.* += len * 4;\n", .{primitive});
@@ -820,6 +844,145 @@ fn generateSerializedSizeFn(allocator: std.mem.Allocator, def: *const constructo
     _ = try writer.write("        return result;\n    }\n");
 }
 
+fn generateCloneFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    _ = try writer.write("    pub fn clone(self: *const @This(), dest: []u8, size: *usize) *const @This() {\n");
+    if (def.params.items.len == 0) {
+        _ = try writer.write("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self)));\n        @memcpy(dest[size.*..size.*+@sizeOf(@This())], @as([*]const u8, @ptrCast(self))[0..@sizeOf(@This())]);\n        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..size.*+@sizeOf(@This())].ptr)));\n        size.* += @sizeOf(@This());\n        return result;\n    }\n");
+        return;
+    }
+    _ = try writer.write("\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self)));\n        @memcpy(dest[size.*..size.*+@sizeOf(@This())], @as([*]const u8, @ptrCast(self))[0..@sizeOf(@This())]);\n        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..@sizeOf(@This())].ptr)));\n        size.* += @sizeOf(@This());\n");
+
+    for (def.params.items) |param| {
+        if (param.type_def) {
+            //_ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+            continue;
+        }
+
+        switch (param.type.?) {
+            .Normal => {
+                if (std.mem.eql(u8, param.type.?.Normal.type.name, "true")) {
+                    continue;
+                }
+                if (param.type.?.Normal.type.generic_arg == null and std.mem.eql(u8, param.type.?.Normal.type.name, "int") or std.mem.eql(u8, param.type.?.Normal.type.name, "long") or std.mem.eql(u8, param.type.?.Normal.type.name, "double") or std.mem.eql(u8, param.type.?.Normal.type.name, "int128") or std.mem.eql(u8, param.type.?.Normal.type.name, "int256") or std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
+                    continue;
+                }
+
+                var param_name = try concat(allocator, try allocator.dupe(u8, "self."), safeParamName(param.name));
+                defer allocator.free(param_name);
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.print("        if (self.{s} != null) {{\n", .{safeParamName(param.name)});
+
+                    allocator.free(param_name);
+                    param_name = try std.fmt.allocPrint(allocator, "self.{s}.?", .{safeParamName(param.name)});
+                }
+
+                if (param.type.?.Normal.type.generic_arg) |generic_arg| {
+
+                    // TODO: Maybe implement multidimensional vectors support. Telegram has never added them into the TL scheme for over 10+ years, so I don't bother right now.
+                    if (generic_arg.generic_arg != null) {
+                        return GenerateFieldTypeError.UnsupportedGenericArg;
+                    }
+
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        //
+                        _ = try writer.print("        {{\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s})));\n        const {s}_vector: [][]const u8 = @alignCast(std.mem.bytesAsSlice([]const u8, dest[size.*..size.*+(@sizeOf([]const u8) * {s}.len)]));\n        size.* += (@sizeOf([]const u8) * {s}.len);\n        for(0..{s}.len) |i| {{\n        {s}_vector[i] = dest[size.*..size.*+{s}[i].len];\n           @memcpy(@constCast({s}_vector[i]), {s}[i]);\n        size.* += {s}[i].len;\n        }}\n        result.{s} = {s}_vector;\n        }}", .{ param_name, safeParamName(param.name), param_name, param_name, param_name, safeParamName(param.name), param_name, safeParamName(param.name), param_name, param_name, safeParamName(param.name), safeParamName(param.name) });
+                    } else if (tlPrimitiveName(param.type.?.Normal.type.name)) |primitive| {
+                        //
+                        _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s})));\n        result.{s} = @alignCast(std.mem.bytesAsSlice({s}, dest[size.* .. size.* + (@sizeOf({s}) * {s}.len)]));\n        @memcpy(@constCast(result.{s}{s}), {s});\n        size.* += (@sizeOf({s}) * {s}.len);\n", .{ param_name, safeParamName(param.name), primitive, primitive, param_name, safeParamName(param.name), if (param.type.?.Normal.flag != null) ".?" else "", param_name, primitive, param_name });
+                    } else {
+                        //
+                        _ = try writer.print("        {{\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s})));\n        const {s}_vector = @constCast(@as(@TypeOf({s}), @alignCast(std.mem.bytesAsSlice(base.unwrapType(@TypeOf({s})), dest[size.* .. size.* + (@sizeOf(base.unwrapType(@TypeOf({s}))) * {s}.len)]))));\n        size.* += (@sizeOf(base.unwrapType(@TypeOf({s}))) * {s}.len);\n        for(0..{s}.len) |i| {{\n        {s}_vector[i] = {s}[i].clone(dest, size);\n        }}\n        result.{s} = {s}_vector;\n        }}", .{ param_name, safeParamName(param.name), param_name, param_name, param_name, param_name, param_name, param_name, param_name, safeParamName(param.name), param_name, safeParamName(param.name), safeParamName(param.name) });
+                    }
+                } else {
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.print("        result.{s} = dest[size.*..size.*+{s}.len];\n        @memcpy(@constCast(result.{s}{s}), {s});\n        size.* += {s}.len;\n", .{ safeParamName(param.name), param_name, safeParamName(param.name), if (param.type.?.Normal.flag != null) ".?" else "", param_name, param_name });
+                    } else {
+                        _ = try writer.print("        result.{s} = {s}.clone(dest, size);\n", .{ safeParamName(param.name), param_name });
+                    }
+                }
+            },
+            else => continue,
+        }
+
+        if (param.type.?.Normal.flag) |_| {
+            _ = try writer.write("        }\n");
+        }
+
+        _ = try writer.write("\n");
+    }
+
+    _ = try writer.write("        return result;\n    }\n");
+}
+
+fn generateSizeFn(allocator: std.mem.Allocator, def: *const constructors.TLConstructor, writer: std.io.AnyWriter) !void {
+    _ = try writer.write("    pub fn cloneSize(self: *const @This(), size: *usize) void {\n");
+    if (def.params.items.len == 0) {
+        _ = try writer.write("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self))) + @sizeOf(@This());\n    }\n");
+        return;
+    }
+    _ = try writer.write("\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self))) + @sizeOf(@This());\n");
+
+    for (def.params.items) |param| {
+        if (param.type_def) {
+            //_ = try writer.write("        //IMPLEMENT TYPEDEF\n");
+            continue;
+        }
+
+        switch (param.type.?) {
+            .Normal => {
+                if (std.mem.eql(u8, param.type.?.Normal.type.name, "true")) {
+                    continue;
+                }
+                if (param.type.?.Normal.type.generic_arg == null and std.mem.eql(u8, param.type.?.Normal.type.name, "int") or std.mem.eql(u8, param.type.?.Normal.type.name, "long") or std.mem.eql(u8, param.type.?.Normal.type.name, "double") or std.mem.eql(u8, param.type.?.Normal.type.name, "int128") or std.mem.eql(u8, param.type.?.Normal.type.name, "int256") or std.mem.eql(u8, param.type.?.Normal.type.name, "Bool")) {
+                    continue;
+                }
+
+                var param_name = try concat(allocator, try allocator.dupe(u8, "self."), safeParamName(param.name));
+                defer allocator.free(param_name);
+
+                if (param.type.?.Normal.flag) |_| {
+                    _ = try writer.print("        if (self.{s} != null) {{\n", .{safeParamName(param.name)});
+
+                    allocator.free(param_name);
+                    param_name = try std.fmt.allocPrint(allocator, "self.{s}.?", .{safeParamName(param.name)});
+                }
+
+                if (param.type.?.Normal.type.generic_arg) |generic_arg| {
+
+                    // TODO: Maybe implement multidimensional vectors support. Telegram has never added them into the TL scheme for over 10+ years, so I don't bother right now.
+                    if (generic_arg.generic_arg != null) {
+                        return GenerateFieldTypeError.UnsupportedGenericArg;
+                    }
+
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s}))) + (@sizeOf([]const u8) * {s}.len);\n         for ({s}) |item| {{\n           size.* += item.len;\n         }}\n", .{ param_name, param_name, param_name });
+                    } else if (tlPrimitiveName(param.type.?.Normal.type.name)) |primitive| {
+                        _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s}))) + (@sizeOf({s}) * {s}.len);\n", .{ param_name, primitive, param_name });
+                    } else {
+                        _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s}))) + (@sizeOf(base.unwrapType(@TypeOf({s}))) * {s}.len);\n        for ({s}) |item| {{\n         item.cloneSize(size);\n        }}", .{ param_name, param_name, param_name, param_name });
+                    }
+                } else {
+                    if (std.mem.eql(u8, param.type.?.Normal.type.name, "string") or std.mem.eql(u8, param.type.?.Normal.type.name, "bytes")) {
+                        _ = try writer.print("        size.* += {s}.len;\n", .{param_name});
+                    } else {
+                        _ = try writer.print("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf({s})));\n        {s}.cloneSize(size);\n", .{ param_name, param_name });
+                    }
+                }
+            },
+            else => continue,
+        }
+
+        if (param.type.?.Normal.flag) |_| {
+            _ = try writer.write("        }\n");
+        }
+
+        _ = try writer.write("\n");
+    }
+
+    _ = try writer.write("    }\n");
+}
+
 fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, definitions: *const std.ArrayList(constructors.TLConstructor), mtproto_definitions: *const std.ArrayList(constructors.TLConstructor)) !void {
     var typess = std.AutoArrayHashMap(u32, std.ArrayList(constructors.TLConstructor)).init(allocator);
     defer {
@@ -882,6 +1045,32 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
         _ = try writer.write("        }\n");
         _ = try writer.write("    }\n");
 
+        _ = try writer.write("    pub fn cloneSize(self: *const @This(), size: *usize) void {\n        switch (self.*) {\n");
+
+        for (ty.value_ptr.items) |def| {
+            _ = try writer.write("                .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" => { return self.");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(".cloneSize(size); },\n");
+        }
+        _ = try writer.write("        }\n");
+        _ = try writer.write("    }\n");
+
+        _ = try writer.write("    pub fn clone(self: *const @This(), dest: []u8, size: *usize) @This() {\n        switch (self.*) {\n");
+
+        for (ty.value_ptr.items) |def| {
+            _ = try writer.write("                .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" => { return .{ .");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(" = self.");
+            _ = try normalizeName(writer, def, false);
+            _ = try writer.write(".clone(dest, size) }; },\n");
+        }
+        _ = try writer.write("        }\n");
+        _ = try writer.write("    }\n");
+
         _ = try writer.write("    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        switch (self.*) {\n");
 
         for (ty.value_ptr.items) |def| {
@@ -890,18 +1079,6 @@ fn tlGenerateBoxedUnion(allocator: std.mem.Allocator, writer: std.io.AnyWriter, 
             _ = try writer.write(" => { return self.");
             _ = try normalizeName(writer, def, false);
             _ = try writer.write(".serialize(dest); },\n");
-        }
-        _ = try writer.write("        }\n");
-        _ = try writer.write("    }\n");
-
-        _ = try writer.write("    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
-
-        for (ty.value_ptr.items) |def| {
-            _ = try writer.write("                .");
-            _ = try normalizeName(writer, def, false);
-            _ = try writer.write(" => { self.");
-            _ = try normalizeName(writer, def, false);
-            _ = try writer.write(".deinit(allocator); },\n");
         }
         _ = try writer.write("        }\n");
         _ = try writer.write("    }\n");
@@ -1002,8 +1179,7 @@ pub fn main() !void {
         _ = try file.write("pub const FutureSalts = base.FutureSalts;\n");
         _ = try file.write("pub const RPCResult = base.RPCResult(TL);\n");
         _ = try file.write("pub const Vector = base.Vector(TL);\n");
-
-        //_ = try file.write("pub const FutureSalts = struct {\n    req_msg_id: u64,\n    now: u32,\n    salts: []const base.FutureSalt,\n\n    pub fn serializedSize(self: *const @This()) usize {\n        return 20 + (self.salts.len * 16);\n    }\n\n    pub fn serialize(self: *const @This(), dest: []u8) usize {\n        var written: usize = 0;\n        written += base.serializeInt(@as(u32, 0xae500895), dest[written..]);\n        written += base.serializeInt(self.req_msg_id, dest[written..]);\n        written += base.serializeInt(self.now, dest[written..]);\n        written += base.serializeInt(self.salts.len, dest[written..]);\n        for (self.salts) |salt| {\n            written += base.serializeInt(salt.valid_since, dest[written..]);\n            written += base.serializeInt(salt.valid_until, dest[written..]);\n            written += base.serializeInt(salt.salt, dest[written..]);\n        }\n        return written;\n    }\n\n    pub fn deserialize(allocator: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!struct { usize, *@This() } {\n        var result = try allocator.create(@This());\n        var read: usize = 0;\n        read += base.deserializeInt(u64, src[read..], &result.req_msg_id);\n        read += base.deserializeInt(u32, src[read..], &result.now);\n\n        const len = base.deserializeInt(u32, src[read..], &read);\n        result.salts = try allocator.alloc(base.FutureSalt, len);\n\n        for (0..len) |i| {\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_since);\n            read += base.deserializeInt(u32, src[read..], &result.salts[i].valid_until);\n            read += base.deserializeInt(u64, src[read..], &result.salts[i].salt);\n        }\n\n        return .{ read, result };\n    }\n};\n");
+        _ = try file.writer().print("pub const LAYER_VERSION: i32 = {d};\n", .{layer.?});
     }
     _ = allocator.detectLeaks();
 }

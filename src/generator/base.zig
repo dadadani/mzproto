@@ -26,13 +26,46 @@ pub fn MessageContainer(comptime ty: type) type {
             const len = std.mem.readInt(u32, @ptrCast(src[cursor.* .. cursor.* + 4]), std.builtin.Endian.little);
             cursor.* += 4;
 
-            size.* += ensureAligned(size.*, @alignOf([]const ty));
+            size.* += ensureAligned(size.*, @alignOf([]const ProtoMessage(ty)));
             size.* += len * @sizeOf(ProtoMessage(ty));
             for (0..len) |_| {
                 cursor.* += 16;
                 ty.deserializedSize(src, cursor, size);
             }
         }
+
+        pub fn cloneSize(self: *const @This(), size: *usize) void {
+            size.* += ensureAligned(size.*, @alignOf(*@This())) + @sizeOf(@This());
+
+            size.* += ensureAligned(size.*, @alignOf([]const ProtoMessage(ty)));
+            size.* += self.messages.len * @sizeOf(ProtoMessage(ty));
+
+            for (self.messages) |message| {
+                message.body.cloneSize(size);
+            }
+        }
+
+        pub fn clone(self: *const @This(), dest: []u8, size: *usize) *@This() {
+            size.* += ensureAligned(size.*, @alignOf(*@This()));
+            const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..].ptr)));
+            size.* += @sizeOf(@This());
+
+            size.* += ensureAligned(size.*, @alignOf([]const ty));
+            //result.messages = @as([]const ProtoMessage(ty), @ptrCast(@alignCast(dest[size.* .. size.* + (@sizeOf(ProtoMessage(ty)) * self.messages.len)])));
+            // @constCast(@as(@TypeOf(result.messages), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(result.messages)), dest[written.* .. written.* + (len * @sizeOf(unwrapType(@TypeOf(result.messages))))]))));
+            result.messages = @as([]const ProtoMessage(ty), @alignCast(std.mem.bytesAsSlice(ProtoMessage(ty), dest[size.* .. size.* + (@sizeOf(ProtoMessage(ty)) * self.messages.len)])));
+            @memcpy(@constCast(result.messages), self.messages);
+            size.* += @sizeOf(ProtoMessage(ty)) * self.messages.len;
+
+            const messages = @constCast(result.messages);
+
+            for (0..self.messages.len) |i| {
+                messages[i].body = self.messages[i].body.clone(dest, size);
+            }
+
+            return result;
+        }
+
         pub fn serialize(self: *const @This(), dest: []u8) usize {
             var written: usize = 0;
 
@@ -120,6 +153,31 @@ pub const FutureSalts = struct {
         }
     }
 
+    pub fn cloneSize(self: *const @This(), size: *usize) void {
+        size.* += ensureAligned(size.*, @alignOf(*@This())) + @sizeOf(@This());
+
+        size.* += ensureAligned(size.*, @alignOf([]const FutureSalt));
+        size.* += self.salts.len * @sizeOf(FutureSalt);
+    }
+
+    pub fn clone(self: *const @This(), dest: []u8, size: *usize) *@This() {
+        size.* += ensureAligned(size.*, @alignOf(*@This()));
+        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..].ptr)));
+
+        result.req_msg_id = self.req_msg_id;
+        result.now = self.now;
+
+        size.* += @sizeOf(@This());
+
+        size.* += ensureAligned(size.*, @alignOf([]const FutureSalt));
+        //result.salts = @as([]const FutureSalt, @alignCast());
+        result.salts = @as([]const FutureSalt, @alignCast(std.mem.bytesAsSlice(FutureSalt, dest[size.* .. size.* + (self.salts.len * @sizeOf(FutureSalt))])));
+        @memcpy(@constCast(result.salts), self.salts);
+        size.* += self.salts.len * @sizeOf(FutureSalt);
+
+        return result;
+    }
+
     pub fn deserialize(src: []const u8, dest: []u8, cursor: *usize, written: *usize) *@This() {
         const alignment = ensureAligned(written.*, @alignOf(*@This()));
         const result = @as(*@This(), @alignCast(@ptrCast(dest[written.* + alignment ..].ptr)));
@@ -175,6 +233,22 @@ pub fn RPCResult(comptime ty: type) type {
             ty.deserializedSize(src, cursor, size);
         }
 
+        pub fn cloneSize(self: *const @This(), size: *usize) void {
+            size.* += ensureAligned(size.*, @alignOf(*@This())) + @sizeOf(@This());
+            self.body.cloneSize(size);
+        }
+
+        pub fn clone(self: *const @This(), dest: []u8, size: *usize) *@This() {
+            size.* += ensureAligned(size.*, @alignOf(*@This()));
+            const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..].ptr)));
+            size.* += @sizeOf(@This());
+
+            result.req_msg_id = self.req_msg_id;
+            result.body = self.body.clone(dest, size);
+
+            return result;
+        }
+
         pub fn deserialize(src: []const u8, dest: []u8, cursor: *usize, written: *usize) *@This() {
             const alignment = ensureAligned(written.*, @alignOf(*@This()));
             const result = @as(*@This(), @alignCast(@ptrCast(dest[written.* + alignment ..].ptr)));
@@ -205,6 +279,34 @@ pub fn Vector(comptime ty: type) type {
             _ = self;
             _ = dest;
             unreachable;
+        }
+
+        pub fn cloneSize(self: *const @This(), size: *usize) void {
+            size.* += ensureAligned(size.*, @alignOf(*@This())) + @sizeOf(@This());
+            size.* += ensureAligned(size.*, @alignOf([]const ty));
+            size.* += self.elements.len * @sizeOf(ty);
+            for (self.elements) |element| {
+                element.cloneSize(size);
+            }
+        }
+
+        pub fn clone(self: *const @This(), dest: []u8, size: *usize) *@This() {
+            size.* += ensureAligned(size.*, @alignOf(*@This()));
+            const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..].ptr)));
+            size.* += @sizeOf(@This());
+
+            size.* += ensureAligned(size.*, @alignOf([]const ty));
+            //result.elements = @as([]const ty, @alignCast(dest[size.* .. size.* + (@sizeOf(ty) * self.elements.len)]));
+            result.elements = @as([]const ty, @alignCast(std.mem.bytesAsSlice(ty, dest[size.* .. size.* + (@sizeOf(ty) * self.elements.len)])));
+            size.* += @sizeOf(ty) * self.elements.len;
+
+            const elements = @constCast(result.elements);
+
+            for (0..self.elements.len) |i| {
+                elements[i] = self.elements[i].clone(dest, size);
+            }
+
+            return result;
         }
 
         pub fn deserializedSize(src: []const u8, cursor: *usize, size: *usize) void {
