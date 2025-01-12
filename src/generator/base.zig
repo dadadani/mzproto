@@ -347,10 +347,12 @@ pub fn Vector(comptime ty: type) type {
                 if (el == 4) {
                     for (0..len) |i| {
                         vector[i] = ty{ .Int = std.mem.readInt(i32, @ptrCast(src[cursor.* .. cursor.* + 4]), std.builtin.Endian.little) };
+                        cursor.* += 4;
                     }
                 } else if (el == 8) {
                     for (0..len) |i| {
                         vector[i] = ty{ .Long = std.mem.readInt(i64, @ptrCast(src[cursor.* .. cursor.* + 4]), std.builtin.Endian.little) };
+                        cursor.* += 8;
                     }
                 } else {
                     for (0..len) |i| {

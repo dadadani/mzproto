@@ -38,8 +38,6 @@ test "basic constructor serialize & deserialize" {
             else => unreachable,
         }
     }
-
-    //_ = std.testing.allocator_instance.detectLeaks();
 }
 
 test "basic constructor with some fields serialize & deserialize" {
@@ -76,6 +74,26 @@ test "basic constructor with some fields serialize & deserialize" {
         switch (deserialized) {
             .InputFile => {
                 const input_file = deserialized.InputFile;
+                try std.testing.expectEqual(123, input_file.id);
+                try std.testing.expectEqual(59535612, input_file.parts);
+                try std.testing.expectEqualStrings("namefieldhere", input_file.name);
+                try std.testing.expectEqualStrings("itworks!!!!0AA", input_file.md5_checksum);
+            },
+            else => unreachable,
+        }
+
+        const clonebuf = try allocator.alloc(u8, writtenAgain);
+        defer allocator.free(clonebuf);
+
+        writtenAgain = 0;
+
+        const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+        try std.testing.expectEqual(written, writtenAgain);
+
+        switch (clone) {
+            .InputFile => {
+                const input_file = clone.InputFile;
                 try std.testing.expectEqual(123, input_file.id);
                 try std.testing.expectEqual(59535612, input_file.parts);
                 try std.testing.expectEqualStrings("namefieldhere", input_file.name);
@@ -188,6 +206,44 @@ test "big constructor serialize & deserialize" {
         },
         else => unreachable,
     }
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+
+    writtenAgain = 0;
+
+    const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (clone) {
+        .Message => {
+            const message = clone.Message;
+
+            try std.testing.expectEqual(32, message.id);
+            try std.testing.expectEqualStrings("asdasd", message.message);
+            try std.testing.expectEqual(342432432, message.date);
+
+            try std.testing.expectEqual(1, message.restriction_reason.?.len);
+            switch (message.restriction_reason.?[0]) {
+                .RestrictionReason => {
+                    const restriction_reason = message.restriction_reason.?[0].RestrictionReason;
+                    try std.testing.expectEqualStrings("platform", restriction_reason.platform);
+                    try std.testing.expectEqualStrings("reason", restriction_reason.reason);
+                    try std.testing.expectEqualStrings("text", restriction_reason.text);
+                },
+            }
+
+            switch (message.peer_id) {
+                .PeerChannel => {
+                    const peer_channel = message.peer_id.PeerChannel;
+                    try std.testing.expectEqual(3543543, peer_channel.channel_id);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
 }
 
 test "MessageContainer serialization & deserialization" {
@@ -220,6 +276,28 @@ test "MessageContainer serialization & deserialization" {
     try std.testing.expectEqual(written, writtenAgain);
 
     switch (deserialized) {
+        .MessageContainer => |x| {
+            try std.testing.expectEqual(342423423543534, x.messages[0].msg_id);
+            try std.testing.expectEqual(23, x.messages[0].seqno);
+
+            switch (x.messages[0].body) {
+                .InputPeerSelf => {},
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+
+    writtenAgain = 0;
+
+    const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (clone) {
         .MessageContainer => |x| {
             try std.testing.expectEqual(342423423543534, x.messages[0].msg_id);
             try std.testing.expectEqual(23, x.messages[0].seqno);
@@ -276,6 +354,32 @@ test "RPCResult serialization & deserialization" {
         },
         else => unreachable,
     }
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+
+    writtenAgain = 0;
+
+    const clone = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (clone) {
+        .RPCResult => |x| {
+            try std.testing.expectEqual(929437432873425453, x.req_msg_id);
+
+            switch (x.body) {
+                .ImportedContact => |xx| {
+                    try std.testing.expectEqual(342432432, xx.client_id);
+                    try std.testing.expectEqual(432423423, xx.user_id);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
 }
 
 test "Vector long deserialization" {
@@ -311,7 +415,34 @@ test "Vector long deserialization" {
     try std.testing.expectEqual(written, writtenAgain);
 
     switch (deserialized) {
-        .Vector => {},
+        .Vector => {
+            const vector = deserialized.Vector;
+            try std.testing.expectEqual(4, vector.elements.len);
+            try std.testing.expectEqual(432423342, vector.elements[0].Long);
+            try std.testing.expectEqual(45346, vector.elements[1].Long);
+            try std.testing.expectEqual(897225, vector.elements[2].Long);
+            try std.testing.expectEqual(4543, vector.elements[3].Long);
+        },
+        else => unreachable,
+    }
+
+    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    defer std.testing.allocator.free(clonebuf);
+
+    writtenAgain = 0;
+    const cloned = deserialized.clone(clonebuf, &writtenAgain);
+
+    try std.testing.expectEqual(written, writtenAgain);
+
+    switch (cloned) {
+        .Vector => {
+            const vector = deserialized.Vector;
+            try std.testing.expectEqual(4, vector.elements.len);
+            try std.testing.expectEqual(432423342, vector.elements[0].Long);
+            try std.testing.expectEqual(45346, vector.elements[1].Long);
+            try std.testing.expectEqual(897225, vector.elements[2].Long);
+            try std.testing.expectEqual(4543, vector.elements[3].Long);
+        },
         else => unreachable,
     }
 }

@@ -850,7 +850,7 @@ fn generateCloneFn(allocator: std.mem.Allocator, def: *const constructors.TLCons
         _ = try writer.write("        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self)));\n        @memcpy(dest[size.*..size.*+@sizeOf(@This())], @as([*]const u8, @ptrCast(self))[0..@sizeOf(@This())]);\n        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..size.*+@sizeOf(@This())].ptr)));\n        size.* += @sizeOf(@This());\n        return result;\n    }\n");
         return;
     }
-    _ = try writer.write("\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self)));\n        @memcpy(dest[size.*..size.*+@sizeOf(@This())], @as([*]const u8, @ptrCast(self))[0..@sizeOf(@This())]);\n        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..@sizeOf(@This())].ptr)));\n        size.* += @sizeOf(@This());\n");
+    _ = try writer.write("\n        size.* += base.ensureAligned(size.*, @alignOf(@TypeOf(self)));\n        @memcpy(dest[size.*..size.*+@sizeOf(@This())], @as([*]const u8, @ptrCast(self))[0..@sizeOf(@This())]);\n        const result = @as(*@This(), @alignCast(@ptrCast(dest[size.*..size.*+@sizeOf(@This())].ptr)));\n        size.* += @sizeOf(@This());\n");
 
     for (def.params.items) |param| {
         if (param.type_def) {
