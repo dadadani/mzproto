@@ -24,7 +24,7 @@ pub const TlIterator = struct {
             return ParseError.EmptyData;
         }
         no_comments_data = try allocator.realloc(no_comments_data, new_len);
- 
+
         return .{ .data = no_comments_data, .index = 0, .section = sections.TLSection.Types, .allocator = allocator };
     }
 
@@ -73,7 +73,6 @@ pub const TlIterator = struct {
             break :parse cn;
         };
 
-        std.debug.print("read {s}\n", .{parse});
         return try constructor.TLConstructor.parse(self.allocator, parse, self.section);
     }
 };

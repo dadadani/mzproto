@@ -22,3 +22,4 @@ zig-out/
 zig-cache/
 
 src/generator/api.zig
+src/lib/tl/api.zig

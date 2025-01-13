@@ -1,6 +1,7 @@
 const std = @import("std");
-const api = @import("generator/api.zig");
-pub fn main() !void {
+const api = @import("lib/tl/api.zig");
+test "basic add functionality" {
+    std.debug.print("Hello, world!\n", .{});
     var allocatorg = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         _ = allocatorg.deinit();
