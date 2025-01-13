@@ -1,3 +1,0 @@
-pub const Network = struct {
-        
-};
