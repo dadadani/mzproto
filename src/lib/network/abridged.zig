@@ -1,22 +1,23 @@
 const std = @import("std");
 
-const NetworkDataProvider = @import("network_data_provider.zig").NetworkDataProvider;
-const SendCallbackFn = @import("network_data_provider.zig").SendCallbackFn;
-const ConnectionEvent = @import("network_data_provider.zig").ConnectionEvent;
+pub const NetworkDataProvider = @import("network_data_provider.zig").NetworkDataProvider;
+pub const SendCallbackFn = @import("network_data_provider.zig").SendCallbackFn;
+pub const ConnectionEvent = @import("network_data_provider.zig").ConnectionEvent;
 
-const TransportProvider = @import("transport_provider.zig").TransportProvider;
-const RecvDataCallback = @import("transport_provider.zig").RecvDataCallback;
-const RecvEventCallback = @import("transport_provider.zig").RecvEventCallback;
+pub const TransportProvider = @import("transport_provider.zig").TransportProvider;
+pub const RecvDataCallback = @import("transport_provider.zig").RecvDataCallback;
+pub const RecvEventCallback = @import("transport_provider.zig").RecvEventCallback;
+pub const ConnectionInfo = @import("transport_provider.zig").ConnectionInfo;
 /// Abridged Protocol
 ///
 /// See https://core.telegram.org/mtproto/mtproto-transports#abridged
-const Abridged = struct {
+pub const Abridged = struct {
     allocator: std.mem.Allocator,
     recvDataCallback: ?*const RecvDataCallback = null,
     recvEventCallback: ?*const RecvEventCallback = null,
     transport_user_data: ?*const anyopaque = null,
 
-    read_status: enum { ReadingLength, ReadingLengthExtended, ReadingBody } = .ReadingLength,
+    read_status: enum { ReadingLength, ReadingLengthExtended, ReadingBody, Terminated } = .ReadingLength,
     connection_open: bool = false,
 
     read_buf: []u8 = &[_]u8{},
@@ -28,6 +29,8 @@ const Abridged = struct {
     net_user_data: ?*const anyopaque = null,
     netSendCallback: ?*const SendCallbackFn = null,
 
+    connecton_info: ConnectionInfo = undefined,
+
     pub fn deinit(self: *Abridged) void {
         if (self.read_buf.len > 0) {
             self.allocator.free(self.read_buf);
@@ -35,6 +38,7 @@ const Abridged = struct {
         if (self.netSendCallback) |func| {
             func(null, self.net_user_data);
         }
+        self.read_status = .Terminated;
     }
 
     pub fn networkProvider(s: *Abridged) NetworkDataProvider {
@@ -108,6 +112,7 @@ const Abridged = struct {
                             try @This().netRecv(ptr, src[incoming.len..]);
                         }
                     },
+                    .Terminated => @panic("Transport has been terminated"),
                 }
             }
 
@@ -115,8 +120,9 @@ const Abridged = struct {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 switch (self.read_status) {
                     .ReadingLength => return 1,
-                    .ReadingLengthExtended => return 4 - (self.extended_len_read - 1),
+                    .ReadingLengthExtended => return 4 - (self.extended_len_read),
                     .ReadingBody => return self.read_buf.len - self.read_len_net,
+                    .Terminated => @panic("Transport has been terminated"),
                 }
             }
 
@@ -152,6 +158,11 @@ const Abridged = struct {
                     },
                 }
             }
+
+            fn getConnectionDetails(ptr: *anyopaque) ConnectionInfo {
+                const self: *Abridged = @ptrCast(@alignCast(ptr));
+                return self.connecton_info;
+            }
         };
 
         return NetworkDataProvider{ .ptr = @ptrCast(s), .vtable = .{
@@ -160,6 +171,7 @@ const Abridged = struct {
             .setUserDataFn = &vtable.netSetUserData,
             .setSendCallbackFn = &vtable.netSetSendCallback,
             .sendEventFn = &vtable.sendEvent,
+            .getConnectionDetails = &vtable.getConnectionDetails,
         } };
     }
 
@@ -200,6 +212,16 @@ const Abridged = struct {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 self.transport_user_data = user_data;
             }
+
+            pub fn setConnectionInfo(ptr: *anyopaque, info: ConnectionInfo) void {
+                const self: *Abridged = @ptrCast(@alignCast(ptr));
+                self.connecton_info = info;
+            }
+
+            pub fn getConnectionDetails(ptr: *anyopaque) ConnectionInfo {
+                const self: *Abridged = @ptrCast(@alignCast(ptr));
+                return self.connecton_info;
+            }
         };
 
         return TransportProvider{ .ptr = @ptrCast(s), .vtable = .{
@@ -207,6 +229,7 @@ const Abridged = struct {
             .setRecvDataCallback = &vtable.setRecvDataCallback,
             .setRecvEventCallback = &vtable.setRecvEventCallback,
             .setUserData = &vtable.setUserData,
+            .setConnectionInfo = &vtable.setConnectionInfo,
         } };
     }
 };

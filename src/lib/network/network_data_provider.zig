@@ -1,9 +1,13 @@
+const ConnectionInfo = @import("transport_provider.zig").ConnectionInfo;
+
+
 pub const RecvFn = fn (*anyopaque, []const u8) anyerror!void;
 pub const SuggestedRecvSizeFn = fn (*anyopaque) usize;
 pub const SetUserDataFn = fn (*anyopaque, ?*const anyopaque) void;
 pub const SendCallbackFn = fn (?[]const u8, ?*const anyopaque) void;
 pub const SetSendCallbackFn = fn (*anyopaque, *const SendCallbackFn) void;
 pub const SendEventFn = fn (*anyopaque, ConnectionEvent) void;
+pub const GetConnectionDetailsFn = fn (*anyopaque) ConnectionInfo;
 
 pub const ConnectionEvent = enum {
     Connected,
@@ -24,26 +28,27 @@ pub const NetworkDataProvider = struct {
         setUserDataFn: *const SetUserDataFn,
         setSendCallbackFn: *const SetSendCallbackFn,
         sendEventFn: *const SendEventFn,
+        getConnectionDetails: *const GetConnectionDetailsFn,
     },
 
     /// Sends data to the upper transport layer.
     ///
     /// When using this function, it is guaranteed that all of the data will be read by the upper layer.
-    pub fn recv(self: NetworkDataProvider, src: []const u8) anyerror!void {
+    pub inline fn recv(self: NetworkDataProvider, src: []const u8) anyerror!void {
         return self.vtable.recvFn(self.ptr, src);
     }
 
     /// Asks the upper layer ideally how much data it should read.
     ///
     /// Note: do not enforce the exact size provided by this function, as the upper layer may and will send more or less data.
-    pub fn suggestedRecvSize(self: NetworkDataProvider) usize {
+    pub inline fn suggestedRecvSize(self: NetworkDataProvider) usize {
         return self.vtable.suggestedRecvSizeFn(self.ptr);
     }
 
     /// Sets user data for the network provider.
     ///
     /// It will be provided as the second argument when the `SendCallbackFn` is called.
-    pub fn setUserData(self: NetworkDataProvider, ptr: ?*anyopaque) void {
+    pub inline fn setUserData(self: NetworkDataProvider, ptr: ?*anyopaque) void {
         return self.vtable.setUserDataFn(self.ptr, ptr);
     }
 
@@ -51,14 +56,18 @@ pub const NetworkDataProvider = struct {
     /// The callback will be called when the network provider wants to send data.
     ///
     /// If the upper layers sets the received data as null, the interface **must** not be used after the callback returns.
-    pub fn setSendCallback(self: NetworkDataProvider, func: *const SendCallbackFn) void {
+    pub inline fn setSendCallback(self: NetworkDataProvider, func: *const SendCallbackFn) void {
         return self.vtable.setSendCallbackFn(self.ptr, func);
     }
 
     /// Sends a particular event to the network provider.
     ///
     /// At least the `Connected` and `Disconnected` events should be implemented by the lower network layer.
-    pub fn sendEvent(self: NetworkDataProvider, event: ConnectionEvent) void {
+    pub inline fn sendEvent(self: NetworkDataProvider, event: ConnectionEvent) void {
         return self.vtable.sendEventFn(self.ptr, event);
+    }
+
+    pub inline fn getConnectionDetails(self: NetworkDataProvider) ConnectionInfo {
+        return self.vtable.getConnectionDetails(self.ptr);
     }
 };

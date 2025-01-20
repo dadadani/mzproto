@@ -18,6 +18,9 @@ fn parseFile(allocator: std.mem.Allocator, definitions: *std.ArrayList(construct
     var iterator = try parser.TlIterator.init(allocator, data);
     defer iterator.deinit();
     while (try iterator.next()) |constructor| {
+        if (std.mem.eql(u8, "schema/mtproto.tl", filename)) {
+            std.debug.print("constructor {s}\n", .{constructor.name});
+        }
         try definitions.append(constructor);
     }
 }

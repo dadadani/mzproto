@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
-    //const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     var apiFileExists = true;
     std.fs.cwd().access(b.path("src/lib/tl/api.zig").getPath2(b, null), .{}) catch |err| {
@@ -53,4 +53,22 @@ pub fn build(b: *std.Build) void {
         run_tests.step.dependOn(generator);
     }
     test_step.dependOn(&run_tests.step);
+
+    const dev_exe = b.addExecutable(.{
+        .name = "dev",
+        .root_source_file = b.path("src/dev_remove_later.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const libxev = b.lazyDependency("libxev", .{ .target = target, .optimize = optimize });
+    if (libxev) |xev| {
+        dev_exe.root_module.addImport("xev", xev.module("xev"));
+
+        const dev_step = b.step("dev", "Run dev shit");
+        const run_dev = b.addRunArtifact(dev_exe);
+        b.installArtifact(dev_exe);
+
+        dev_step.dependOn(&run_dev.step);
+    }
 }
