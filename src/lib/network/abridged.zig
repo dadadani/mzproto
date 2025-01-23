@@ -247,12 +247,11 @@ pub fn toSendData(data: ?[]const u8, user_data: ?*const anyopaque) void {
     if (data == null) {
         return;
     }
-    std.debug.print("need to send data: {d}\n", .{data.?});
 }
 
 pub fn TrransportRecvData(data: []const u8, user_data: ?*const anyopaque) void {
     _ = user_data;
-    std.debug.print("TransportRecvData: {d}\n", .{data});
+    _ = data;
 }
 
 test "test read" {

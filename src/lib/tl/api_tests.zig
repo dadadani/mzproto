@@ -4,7 +4,6 @@ const api = @import("api.zig");
 test "basic constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
     //defer _ = std.testing.allocator_instance.detectLeaks();
-
     {
         const constructor = api.TL{ .InputUserSelf = &api.InputUserSelf{} };
 
