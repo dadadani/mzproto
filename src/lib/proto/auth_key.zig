@@ -5,6 +5,8 @@ const TransportProvider = @import("../network/transport_provider.zig").Transport
 const ConnectionEvent = @import("../network/network_data_provider.zig").ConnectionEvent;
 const RecvDataCallback = @import("../network/transport_provider.zig").RecvDataCallback;
 const ige = @import("../crypto/ige.zig").ige;
+const modPow = @import("../crypto/exp.zig").modpow;
+
 pub const GenError = error{
     ConnectionClosed,
     InvalidResponse,
@@ -82,28 +84,6 @@ pub const AuthGen = struct {
                 self.callback(self.user_data, GenError.ConnectionClosed);
             },
         }
-    }
-    // This is needed for now for the dhPrime part, because std.crypto.ff often returns "NonCanonical"
-    // TODO: replace this with a proper, optimized implementation
-    fn modPow(nn: u4096, ee: u4096, m: u4096) u4096 {
-        if (m == 1) {
-            return 0;
-        }
-        var n = nn;
-        var e = ee;
-
-        var result: u4096 = 1;
-        n = nn % m;
-        while (e > 0) {
-            if (e % 2 == 1) {
-                result = (result * n) % m;
-            }
-
-            e >>= 1;
-
-            n = (n * n) % m;
-        }
-        return result;
     }
 
     inline fn rangeCheck(val: u2048, min: u2048, max: u2048) !void {

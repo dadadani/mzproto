@@ -1,5 +1,5 @@
 const ConnectionInfo = @import("transport_provider.zig").ConnectionInfo;
-
+const TransportEvent = @import("transport_provider.zig").TransportEvent;
 
 pub const RecvFn = fn (*anyopaque, []const u8) anyerror!void;
 pub const SuggestedRecvSizeFn = fn (*anyopaque) usize;
@@ -9,7 +9,11 @@ pub const SetSendCallbackFn = fn (*anyopaque, *const SendCallbackFn) void;
 pub const SendEventFn = fn (*anyopaque, ConnectionEvent) void;
 pub const GetConnectionDetailsFn = fn (*anyopaque) ConnectionInfo;
 
+pub const RecvEventCallback = fn (TransportEvent, ?*const anyopaque) void;
+pub const SetRecvEventCallback = fn (*anyopaque, *const RecvEventCallback) void;
+
 pub const ConnectionEvent = enum {
+    ConnectError,
     Connected,
     Disconnected,
 };
@@ -27,6 +31,7 @@ pub const NetworkDataProvider = struct {
         suggestedRecvSizeFn: *const SuggestedRecvSizeFn,
         setUserDataFn: *const SetUserDataFn,
         setSendCallbackFn: *const SetSendCallbackFn,
+        setRecvEventCallback: *const SetRecvEventCallback,
         sendEventFn: *const SendEventFn,
         getConnectionDetails: *const GetConnectionDetailsFn,
     },
@@ -69,5 +74,9 @@ pub const NetworkDataProvider = struct {
 
     pub inline fn getConnectionDetails(self: NetworkDataProvider) ConnectionInfo {
         return self.vtable.getConnectionDetails(self.ptr);
+    }
+
+    pub inline fn setRecvEventCallback(self: NetworkDataProvider, func: *const RecvEventCallback) void {
+        return self.vtable.setRecvEventCallback(self.ptr, func);
     }
 };

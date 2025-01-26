@@ -7,7 +7,8 @@ const Abridged = @import("lib/network/abridged.zig").Abridged;
 const NetworkDataProvider = @import("lib/network/network_data_provider.zig");
 const TransportProvider = @import("lib/network/transport_provider.zig");
 
-const AuthKey = @import("lib/proto//auth_key.zig");
+const ConnectionInfo = @import("lib/network/transport_provider.zig").ConnectionInfo;
+const AuthKey = @import("lib/proto/auth_key.zig");
 
 var ge = std.heap.GeneralPurposeAllocator(.{}){};
 var loop: xev.Loop = undefined;
@@ -36,7 +37,7 @@ fn onTcpData(
         std.log.err("Failed to read: {}", .{err});
         return .disarm;
     };
-    std.log.info("incoming Data: {d}", .{b.slice[0..size]});
+    //std.log.info("incoming Data: {d}", .{b.slice[0..size]});
     connection.transport.networkProvider().recv(b.slice[0..size]) catch |err| {
         std.log.err("Failed to process data: {}", .{err});
         return .disarm;
@@ -78,7 +79,10 @@ fn onDataWritten(
         return .disarm;
     };
 
-    std.log.info("Data written: {x}", .{std.fmt.fmtSliceHexLower(b.slice[0..size])});
+    _ = size;
+    _ = b;
+
+    //std.log.info("Data written: {x}", .{std.fmt.fmtSliceHexLower(b.slice[0..size])});
 
     return .disarm;
 }
@@ -87,7 +91,7 @@ fn ontTcpDataToSend(data: ?[]const u8, user_data: ?*const anyopaque) void {
     _ = user_data;
 
     if (data) |d| {
-        std.log.info("Data to send: {d}", .{d});
+        //std.log.info("Data to send: {d}", .{d});
 
         const write = ge.allocator().create(WriteSession) catch |err| {
             std.log.err("Failed to create write session: {}", .{err});
@@ -162,7 +166,81 @@ pub fn main() !void {
 
     const address = try std.net.Ip4Address.parse("149.154.167.40", 443);
     tcp = try xev.TCP.init(.{ .in = address });
+
     tcp.connect(&loop, &connection.completion, std.net.Address{ .in = address }, void, null, connectedCb);
 
     try loop.run(.until_done);
 }
+
+const XevNetworkDataProvider = struct {
+    tcp: ?xev.TCP,
+    loop: *xev.Loop,
+    networkDataProvider: NetworkDataProvider.NetworkDataProvider,
+    completion: xev.Completion,
+
+    fn sendData(data: ?[]const u8, ptr: ?*const anyopaque) void {
+        _ = ptr;
+        _ = data;
+    }
+
+    fn connectedCb(ud: ?*XevNetworkDataProvider, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.ConnectError!void) xev.CallbackAction {
+        if (ud == null) {
+            return .disarm;
+        }
+        _ = l;
+        _ = c;
+        _ = s;
+
+        r catch {
+            ud.networkDataProvider.sendEvent(.ConnectError);
+            return .disarm;
+        };
+    }
+
+    fn recvEvent(event: TransportProvider.TransportEvent, ptr: ?*const anyopaque) void {
+        if (ptr == null) {
+            return;
+        }
+        const self: *XevNetworkDataProvider = @ptrCast(@alignCast(ptr.?));
+        switch (event) {
+            .Connect => {
+                if (tcp != null) {
+                    return;
+                }
+                const info = self.networkDataProvider.getConnectionDetails();
+                self.tcp = try xev.TCP.init(info.address) catch {
+                    self.networkDataProvider.sendEvent(.ConnectError);
+                    return;
+                };
+
+                self.tcp.?.connect(
+                    self.loop,
+                    &self.completion,
+                    info.address,
+                    XevNetworkDataProvider,
+                );
+            },
+        }
+    }
+
+    pub fn init(allocator: std.mem.Allocator, lp: *xev.Loop, ndp: NetworkDataProvider.NetworkDataProvider) !*XevNetworkDataProvider {
+        const result = try allocator.create(XevNetworkDataProvider);
+        errdefer allocator.destroy(result);
+
+        result.* = .{
+            .tcp = null,
+            .loop = lp,
+            .networkDataProvider = ndp,
+        };
+
+        result.networkDataProvider.setUserData(result);
+        result.networkDataProvider.setRecvEventCallback(recvEvent);
+        result.networkDataProvider.setSendCallback(sendData);
+
+        return result;
+    }
+
+    pub fn deinit(self: *XevNetworkDataProvider, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};

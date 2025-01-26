@@ -8,6 +8,10 @@ pub const TransportProvider = @import("transport_provider.zig").TransportProvide
 pub const RecvDataCallback = @import("transport_provider.zig").RecvDataCallback;
 pub const RecvEventCallback = @import("transport_provider.zig").RecvEventCallback;
 pub const ConnectionInfo = @import("transport_provider.zig").ConnectionInfo;
+
+pub const TransportEvent = @import("transport_provider.zig").TransportEvent;
+pub const TransportRecvEventCallback = @import("network_data_provider.zig").RecvEventCallback;
+
 /// Abridged Protocol
 ///
 /// See https://core.telegram.org/mtproto/mtproto-transports#abridged
@@ -28,6 +32,8 @@ pub const Abridged = struct {
 
     net_user_data: ?*const anyopaque = null,
     netSendCallback: ?*const SendCallbackFn = null,
+
+    transportEventCallback: ?*const TransportRecvEventCallback = null,
 
     connecton_info: ConnectionInfo = undefined,
 
@@ -159,6 +165,11 @@ pub const Abridged = struct {
                 }
             }
 
+            fn setRecvEventCallback(ptr: *anyopaque, func: *const TransportRecvEventCallback) void {
+                const self: *Abridged = @ptrCast(@alignCast(ptr));
+                self.transportEventCallback = func;
+            }
+
             fn getConnectionDetails(ptr: *anyopaque) ConnectionInfo {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 return self.connecton_info;
@@ -172,6 +183,7 @@ pub const Abridged = struct {
             .setSendCallbackFn = &vtable.netSetSendCallback,
             .sendEventFn = &vtable.sendEvent,
             .getConnectionDetails = &vtable.getConnectionDetails,
+            .setRecvEventCallback = &vtable.setRecvEventCallback,
         } };
     }
 
@@ -222,6 +234,13 @@ pub const Abridged = struct {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 return self.connecton_info;
             }
+
+            pub fn sendEvent(ptr: *anyopaque, event: TransportEvent) void {
+                const self: *Abridged = @ptrCast(@alignCast(ptr));
+                if (self.transportEventCallback) |send| {
+                    send(event, self.transport_user_data);
+                }
+            }
         };
 
         return TransportProvider{ .ptr = @ptrCast(s), .vtable = .{
@@ -230,6 +249,7 @@ pub const Abridged = struct {
             .setRecvEventCallback = &vtable.setRecvEventCallback,
             .setUserData = &vtable.setUserData,
             .setConnectionInfo = &vtable.setConnectionInfo,
+            .sendEvent = &vtable.sendEvent,
         } };
     }
 };

@@ -10,6 +10,13 @@ pub const SetRecvEventCallback = fn (*anyopaque, *const RecvEventCallback) void;
 pub const SetUserDataFn = fn (*anyopaque, ?*const anyopaque) void;
 pub const SetConnectionInfoFn = fn (*anyopaque, ConnectionInfo) void;
 
+pub const TransportEvent = enum {
+    Connect,
+    Disconnect
+};
+
+pub const SendEventFn = fn (*anyopaque, TransportEvent) void;
+
 pub const ConnectionInfo = struct {
     dcId: u8,
     testMode: bool,
@@ -25,6 +32,7 @@ pub const TransportProvider = struct {
 
     vtable: struct {
         sendData: *const SendFn,
+        sendEvent: *const SendEventFn,
         setRecvDataCallback: *const SetRecvDataCallback,
         setRecvEventCallback: *const SetRecvEventCallback,
         setUserData: *const SetUserDataFn,
@@ -49,5 +57,9 @@ pub const TransportProvider = struct {
 
     pub inline fn setConnectionInfo(self: TransportProvider, info: ConnectionInfo) void {
         return self.vtable.setConnectionInfo(self.ptr, info);
+    }
+
+    pub inline fn sendEvent(self: TransportProvider, event: TransportEvent) void {
+        return self.vtable.sendEvent(self.ptr, event);
     }
 };
