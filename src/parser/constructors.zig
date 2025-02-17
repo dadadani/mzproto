@@ -161,7 +161,7 @@ pub const TLConstructor = struct {
             }
         }
 
-        const constructor_name = namespace.pop();
+        const constructor_name = namespace.pop().?;
         return .{
             .allocator = allocator,
             .namespaces = namespace,

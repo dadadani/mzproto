@@ -178,6 +178,27 @@ const XevNetworkDataProvider = struct {
     networkDataProvider: NetworkDataProvider.NetworkDataProvider,
     completion: xev.Completion,
 
+    fn xevConnected(
+        self: ?*@This(),
+        l: *xev.Loop,
+        c: *xev.Completion,
+        s: xev.TCP,
+        r: xev.ConnectError!void,
+    ) xev.CallbackAction {
+        _ = l;
+        _ = c;
+        _ = s;
+
+        r catch {
+            self.networkDataProvider.sendEvent(.ConnectError);
+            return .disarm;
+        };
+
+        self.networkDataProvider.sendEvent(.Connected);
+
+        return .disarm;
+    }
+
     fn sendData(data: ?[]const u8, ptr: ?*const anyopaque) void {
         _ = ptr;
         _ = data;
@@ -195,6 +216,8 @@ const XevNetworkDataProvider = struct {
             ud.networkDataProvider.sendEvent(.ConnectError);
             return .disarm;
         };
+
+        return .disarm;
     }
 
     fn recvEvent(event: TransportProvider.TransportEvent, ptr: ?*const anyopaque) void {
@@ -218,6 +241,17 @@ const XevNetworkDataProvider = struct {
                     &self.completion,
                     info.address,
                     XevNetworkDataProvider,
+                    self,
+                );
+            },
+
+            .Disconnect => {
+                if (tcp == null) {
+                    return;
+                }
+
+                self.tcp.?.close(
+                    self.loop,
                 );
             },
         }

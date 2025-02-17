@@ -50,7 +50,7 @@ pub const TLType = struct {
             try namespaces.append(try allocator.dupe(u8, ns));
         }
 
-        const name = namespaces.pop();
+        const name = namespaces.pop().?;
 
         const bare = blk: {
             if (std.ascii.isLower(name[0])) {

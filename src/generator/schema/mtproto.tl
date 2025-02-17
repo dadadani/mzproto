@@ -68,9 +68,6 @@ http_wait#9299359f max_delay:int wait_after:int max_wait:int = HttpWait;
 
 ---functions---
 
-
-req_pq_fake#be7e8ef1 nonce:int128 = ResPQ;
-
 req_pq_multi#be7e8ef1 nonce:int128 = ResPQ;
 
 req_DH_params#d712e4be nonce:int128 server_nonce:int128 p:bytes q:bytes public_key_fingerprint:long encrypted_data:bytes = Server_DH_Params;

@@ -43,13 +43,13 @@ pub const TlIterator = struct {
             }
 
             const end = end: {
-                    if (std.mem.indexOf(u8, self.data[self.index..], DEFINITION_SEPARATOR)) |pos| {
-                        break :end self.index + pos;
-                    }
-                    break :end self.data.len;
-                };
-                const trm = utils.trimWhitespace(self.data[self.index..end]);
-                self.index = end + DEFINITION_SEPARATOR.len;
+                if (std.mem.indexOf(u8, self.data[self.index..], DEFINITION_SEPARATOR)) |pos| {
+                    break :end self.index + pos;
+                }
+                break :end self.data.len;
+            };
+            const trm = utils.trimWhitespace(self.data[self.index..end]);
+            self.index = end + DEFINITION_SEPARATOR.len;
 
             if (trm.len != 0) {
                 break trm;
@@ -60,19 +60,19 @@ pub const TlIterator = struct {
             if (std.mem.startsWith(u8, cn, "---")) {
                 if (std.mem.startsWith(u8, cn, FUNCTIONS_SEPARATOR)) {
                     self.section = sections.TLSection.Functions;
-                    std.debug.print("cn -> {s}\n", .{cn});
-                    return self.next();
-                    //break :parse utils.trimWhitespace(std.mem.trimLeft(u8, self.data[self.index..], FUNCTIONS_SEPARATOR));
+                    std.debug.print("cn -> {s}\n", .{cn[FUNCTIONS_SEPARATOR.len..]});
+                    break :parse utils.trimWhitespace(std.mem.trimLeft(u8, cn, FUNCTIONS_SEPARATOR));
                 } else if (std.mem.startsWith(u8, cn, TYPES_SEPARATOR)) {
                     self.section = sections.TLSection.Types;
-                    return self.next();
-                    //break :parse utils.trimWhitespace(std.mem.trimLeft(u8, self.data[self.index..], TYPES_SEPARATOR));
+                    break :parse utils.trimWhitespace(std.mem.trimLeft(u8, cn, TYPES_SEPARATOR));
                 } else {
                     break :parse ParseError.UnknownSectionType;
                 }
             }
             break :parse cn;
         };
+
+        std.debug.print("cna -> {s}\n", .{parse});
 
         return try constructor.TLConstructor.parse(self.allocator, parse, self.section);
     }

@@ -162,6 +162,9 @@ pub const Abridged = struct {
                     .Disconnected => {
                         self.connection_open = false;
                     },
+                    .ConnectError => {
+                        @panic("implement pls");
+                    },
                 }
             }
 
