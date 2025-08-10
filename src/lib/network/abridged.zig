@@ -163,7 +163,7 @@ pub const Abridged = struct {
                         self.connection_open = false;
                     },
                     .ConnectError => {
-                        @panic("implement pls");
+                        self.connection_open = false;
                     },
                 }
             }

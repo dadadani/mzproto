@@ -83,6 +83,9 @@ pub const AuthGen = struct {
             ConnectionEvent.Disconnected => {
                 self.callback(self.user_data, GenError.ConnectionClosed);
             },
+            ConnectionEvent.ConnectError => {
+                self.callback(self.user_data, GenError.ConnectionClosed);
+            },
         }
     }
 
@@ -489,16 +492,7 @@ pub const AuthGen = struct {
         const buf = try self.allocator.alloc(u8, @sizeOf(i64) + @sizeOf(i64) + @sizeOf(i32) + data.len);
         defer self.allocator.free(buf);
 
-        @memcpy(buf[0..8], &[_]u8{
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        });
+        @memset(buf[0..8], 0);
         std.mem.writeInt(i64, buf[8..16], std.time.milliTimestamp() << 32, .little);
         std.mem.writeInt(i32, buf[16..20], @intCast(data.len), .little);
         @memcpy(buf[20..], data);

@@ -24,10 +24,9 @@ pub const TLType = struct {
                 if (!std.mem.endsWith(u8, genericRef[0], ">")) {
                     break :split ParseTypeError.MissingGenericArg;
                 }
-                const ty = genericRef[0][pos + 1 ..];
                 break :split .{
-                    ty[0 .. ty.len - 1],
-                    try TLType.parse(allocator, genericRef[0][0..pos]),
+                    genericRef[0][0..pos],
+                    try TLType.parse(allocator, genericRef[0][pos + 1 .. genericRef[0].len - 1]),
                 };
             } else {
                 break :split .{
@@ -36,6 +35,11 @@ pub const TLType = struct {
                 };
             }
         };
+        errdefer {
+            if (genericArg[1]) |generic_arg| {
+                generic_arg.deinit();
+            }
+        }
 
         var namespaces = std.ArrayList([]const u8).init(allocator);
         errdefer {

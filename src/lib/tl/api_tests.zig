@@ -3,36 +3,45 @@ const api = @import("api.zig");
 
 test "basic constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
-    //defer _ = std.testing.allocator_instance.detectLeaks();
     {
         const constructor = api.TL{ .InputUserSelf = &api.InputUserSelf{} };
 
-        var dest = try allocator.alloc(u8, constructor.serializedSize());
+        const dest = try allocator.alloc(u8, constructor.serializeSize());
         defer allocator.free(dest);
 
         const serialized = constructor.serialize(dest);
 
-        dest = dest[0..serialized];
+        try std.testing.expectEqual(constructor.serializeSize(), serialized);
 
-        var cursor: usize = 0;
-        var written: usize = 0;
-        api.IInputUser.deserializedSize(dest, &cursor, &written);
+        var size: usize = 0;
+        const deserialized_read_bytes = api.IInputUser.deserializeSize(dest, &size);
+        try std.testing.expectEqual(constructor.serializeSize(), deserialized_read_bytes);
 
-        const deserializeBuffer = try allocator.alloc(u8, written);
+        const deserializeBuffer = try allocator.alloc(u8, size);
         defer allocator.free(deserializeBuffer);
 
-        cursor = 0;
-        written = 0;
+        size = 0;
 
-        const deserialized = api.IInputUser.deserialize(dest, deserializeBuffer, &cursor, &written);
+        const deserializedx = api.IInputUser.deserialize(dest, deserializeBuffer);
+        const deserialized = deserializedx[0];
 
         var writtenAgain: usize = 0;
 
         deserialized.cloneSize(&writtenAgain);
 
-        try std.testing.expectEqual(written, writtenAgain);
+        try std.testing.expectEqual(size, writtenAgain);
+
+        const clone_dest = try allocator.alloc(u8, writtenAgain);
+        defer allocator.free(clone_dest);
+
+        const clone = deserialized.clone(clone_dest);
 
         switch (deserialized) {
+            .InputUserSelf => {},
+            else => unreachable,
+        }
+
+        switch (clone[0]) {
             .InputUserSelf => {},
             else => unreachable,
         }
@@ -45,30 +54,33 @@ test "basic constructor with some fields serialize & deserialize" {
     {
         var constructor = api.IInputFile{ .InputFile = &api.InputFile{ .id = 123, .parts = 59535612, .name = "namefieldhere", .md5_checksum = "itworks!!!!0AA" } };
 
-        var dest = try allocator.alloc(u8, constructor.serializedSize());
+        const dest = try allocator.alloc(u8, constructor.serializeSize());
         defer allocator.free(dest);
 
         const serialized = constructor.serialize(dest);
 
-        dest = dest[0..serialized];
+        try std.testing.expectEqual(constructor.serializeSize(), serialized);
 
-        var cursor: usize = 0;
-        var written: usize = 0;
+        var size: usize = 0;
 
-        api.IInputFile.deserializedSize(dest, &cursor, &written);
+        const deserialized_read = api.IInputFile.deserializeSize(dest, &size);
 
-        const deserializeBuffer = try allocator.alloc(u8, written);
+        try std.testing.expectEqual(constructor.serializeSize(), deserialized_read);
+
+        const deserializeBuffer = try allocator.alloc(u8, size);
         defer allocator.free(deserializeBuffer);
 
-        cursor = 0;
-        written = 0;
-        const deserialized = api.IInputFile.deserialize(dest, deserializeBuffer, &cursor, &written);
+        const deserializedx = api.IInputFile.deserialize(dest, deserializeBuffer);
+        const deserialized = deserializedx[0];
 
-        var writtenAgain: usize = 0;
+        try std.testing.expectEqual(size, deserializedx[1]);
+        try std.testing.expectEqual(constructor.serializeSize(), deserializedx[2]);
 
-        deserialized.cloneSize(&writtenAgain);
+        var sizeAgain: usize = 0;
 
-        try std.testing.expectEqual(written, writtenAgain);
+        deserialized.cloneSize(&sizeAgain);
+
+        try std.testing.expectEqual(size, sizeAgain);
 
         switch (deserialized) {
             .InputFile => {
@@ -81,18 +93,16 @@ test "basic constructor with some fields serialize & deserialize" {
             else => unreachable,
         }
 
-        const clonebuf = try allocator.alloc(u8, writtenAgain);
+        const clonebuf = try allocator.alloc(u8, sizeAgain);
         defer allocator.free(clonebuf);
 
-        writtenAgain = 0;
+        const clone = deserialized.clone(clonebuf);
 
-        const clone = deserialized.clone(clonebuf, &writtenAgain);
+        try std.testing.expectEqual(size, clone[1]);
 
-        try std.testing.expectEqual(written, writtenAgain);
-
-        switch (clone) {
+        switch (clone[0]) {
             .InputFile => {
-                const input_file = clone.InputFile;
+                const input_file = clone[0].InputFile;
                 try std.testing.expectEqual(123, input_file.id);
                 try std.testing.expectEqual(59535612, input_file.parts);
                 try std.testing.expectEqualStrings("namefieldhere", input_file.name);
@@ -104,34 +114,56 @@ test "basic constructor with some fields serialize & deserialize" {
 }
 
 test "deserialize constructor with int vector" {
+    const allocator = std.testing.allocator;
+
     const data = [_]u8{ 60, 65, 92, 248, 191, 237, 60, 25, 0, 0, 0, 0, 21, 196, 181, 28, 3, 0, 0, 0, 128, 0, 0, 0, 128, 0, 0, 0, 0, 1, 0, 0 };
 
-    var cursor: usize = 0;
-    var written: usize = 0;
+    var size: usize = 0;
 
-    api.IVideoSize.deserializedSize(&data, &cursor, &written);
+    const deserialize_read = api.IVideoSize.deserializeSize(&data, &size);
 
-    const deserializeBuffer = try std.testing.allocator.alloc(u8, written);
+    try std.testing.expectEqual(data.len, deserialize_read);
+
+    const deserializeBuffer = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(deserializeBuffer);
 
-    cursor = 0;
-    written = 0;
+    const deserializedx = api.IVideoSize.deserialize(&data, deserializeBuffer);
 
-    const deserialized = api.IVideoSize.deserialize(&data, deserializeBuffer, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(data.len, deserializedx[2]);
 
-    try std.testing.expectEqual(data.len, cursor);
+    const deserialized = deserializedx[0];
+
+    const serialize_size = deserialized.serializeSize();
+    try std.testing.expectEqual(serialize_size, data.len);
 
     var writtenAgain: usize = 0;
 
     deserialized.cloneSize(&writtenAgain);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, writtenAgain);
 
     switch (deserialized) {
         .VideoSizeEmojiMarkup => {
             const video_size = deserialized.VideoSizeEmojiMarkup;
             try std.testing.expectEqual(423423423, video_size.emoji_id);
-            try std.testing.expectEqualSlices(i32, &[_]i32{ 128, 128, 256 }, video_size.background_colors);
+            try std.testing.expectEqualSlices(u32, &[_]u32{ 128, 128, 256 }, video_size.background_colors);
+        },
+        else => unreachable,
+    }
+
+    const clone_bytes = try allocator.alloc(u8, writtenAgain);
+    defer allocator.free(clone_bytes);
+
+    const clone = deserialized.clone(clone_bytes);
+
+    try std.testing.expectEqual(size, clone[1]);
+
+    switch (clone[0]) {
+        .VideoSizeEmojiMarkup => {
+            const video_size = deserialized.VideoSizeEmojiMarkup;
+            try std.testing.expectEqual(423423423, video_size.emoji_id);
+            try std.testing.expectEqualSlices(u32, &[_]u32{ 128, 128, 256 }, video_size.background_colors);
         },
         else => unreachable,
     }
@@ -150,32 +182,33 @@ test "big constructor serialize & deserialize" {
         .date = 342432432,
     } };
 
-    const size = constructor.serializedSize();
-    var dest = try allocator.alloc(u8, size);
+    var size = constructor.serializeSize();
+    const dest = try allocator.alloc(u8, size);
     defer allocator.free(dest);
 
     const serialized = constructor.serialize(dest);
 
-    dest = dest[0..serialized];
+    try std.testing.expectEqual(serialized, size);
 
-    var cursor: usize = 0;
-    var written: usize = 0;
+    size = 0;
 
-    api.TL.deserializedSize(dest, &cursor, &written);
+    const deserialize_size = api.TL.deserializeSize(dest, &size);
+    try std.testing.expectEqual(constructor.serializeSize(), deserialize_size);
 
-    const deserializeBuffer = try std.testing.allocator.alloc(u8, written);
+    const deserializeBuffer = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(deserializeBuffer);
 
-    cursor = 0;
-    written = 0;
+    const deserializedx = api.TL.deserialize(dest, deserializeBuffer);
+    const deserialized = deserializedx[0];
 
-    const deserialized = api.TL.deserialize(dest, deserializeBuffer, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(constructor.serializeSize(), deserializedx[2]);
 
-    var writtenAgain: usize = 0;
+    var size_again: usize = 0;
 
-    deserialized.cloneSize(&writtenAgain);
+    deserialized.cloneSize(&size_again);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, size_again);
 
     switch (deserialized) {
         .Message => {
@@ -206,18 +239,16 @@ test "big constructor serialize & deserialize" {
         else => unreachable,
     }
 
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
 
-    writtenAgain = 0;
+    const clone = deserialized.clone(clonebuf);
 
-    const clone = deserialized.clone(clonebuf, &writtenAgain);
+    try std.testing.expectEqual(size, clone[1]);
 
-    try std.testing.expectEqual(written, writtenAgain);
-
-    switch (clone) {
+    switch (clone[0]) {
         .Message => {
-            const message = clone.Message;
+            const message = clone[0].Message;
 
             try std.testing.expectEqual(32, message.id);
             try std.testing.expectEqualStrings("asdasd", message.message);
@@ -246,33 +277,35 @@ test "big constructor serialize & deserialize" {
 }
 
 test "MessageContainer serialization & deserialization" {
-    const container = api.MessageContainer{ .messages = &[_]api.ProtoMessage{api.ProtoMessage{ .body = api.TL{ .InputPeerSelf = &api.InputPeerSelf{} }, .msg_id = 342423423543534, .seqno = 23 }} };
+    const container = api.TL{ .MessageContainer = &.{ .messages = &[_]api.ProtoMessage{api.ProtoMessage{ .body = api.TL{ .InputPeerSelf = &api.InputPeerSelf{} }, .msg_id = 342423423543534, .seqno = 23 }} } };
 
-    var sbuf = try std.testing.allocator.alloc(u8, container.serializedSize());
+    const sbuf = try std.testing.allocator.alloc(u8, container.serializeSize());
     defer std.testing.allocator.free(sbuf);
 
-    var written = container.serialize(sbuf);
+    const written = container.serialize(sbuf);
 
-    sbuf = sbuf[0..written];
+    try std.testing.expectEqual(written, sbuf.len);
 
-    var cursor: usize = 0;
-    written = 0;
+    var size: usize = 0;
 
-    api.TL.deserializedSize(sbuf, &cursor, &written);
+    const deserialized_read = api.TL.deserializeSize(sbuf, &size);
 
-    const dbuf = try std.testing.allocator.alloc(u8, written);
+    try std.testing.expectEqual(sbuf.len, deserialized_read);
+
+    const dbuf = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(dbuf);
 
-    cursor = 0;
-    written = 0;
+    const deserializedx = api.TL.deserialize(sbuf, dbuf);
+    const deserialized = deserializedx[0];
 
-    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(sbuf.len, deserializedx[2]);
 
-    var writtenAgain: usize = 0;
+    var size_again: usize = 0;
 
-    deserialized.cloneSize(&writtenAgain);
+    deserialized.cloneSize(&size_again);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, size_again);
 
     switch (deserialized) {
         .MessageContainer => |x| {
@@ -287,16 +320,14 @@ test "MessageContainer serialization & deserialization" {
         else => unreachable,
     }
 
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
 
-    writtenAgain = 0;
+    const clone = deserialized.clone(clonebuf);
 
-    const clone = deserialized.clone(clonebuf, &writtenAgain);
+    try std.testing.expectEqual(clone[1], size_again);
 
-    try std.testing.expectEqual(written, writtenAgain);
-
-    switch (clone) {
+    switch (clone[0]) {
         .MessageContainer => |x| {
             try std.testing.expectEqual(342423423543534, x.messages[0].msg_id);
             try std.testing.expectEqual(23, x.messages[0].seqno);
@@ -311,33 +342,35 @@ test "MessageContainer serialization & deserialization" {
 }
 
 test "RPCResult serialization & deserialization" {
-    const constructor = api.RPCResult{ .body = api.TL{ .ImportedContact = &api.ImportedContact{ .user_id = 432423423, .client_id = 342432432 } }, .req_msg_id = 929437432873425453 };
+    const constructor = api.TL{ .RPCResult = &.{ .body = api.TL{ .ImportedContact = &api.ImportedContact{ .user_id = 432423423, .client_id = 342432432 } }, .req_msg_id = 929437432873425453 } };
 
-    var sbuf = try std.testing.allocator.alloc(u8, constructor.serializedSize());
+    const sbuf = try std.testing.allocator.alloc(u8, constructor.serializeSize());
     defer std.testing.allocator.free(sbuf);
 
-    var written = constructor.serialize(sbuf);
+    const written = constructor.serialize(sbuf);
 
-    sbuf = sbuf[0..written];
+    try std.testing.expectEqual(sbuf.len, written);
 
-    var cursor: usize = 0;
-    written = 0;
+    var size: usize = 0;
 
-    api.TL.deserializedSize(sbuf, &cursor, &written);
+    const deserialized_read = api.TL.deserializeSize(sbuf, &size);
 
-    const dbuf = try std.testing.allocator.alloc(u8, written);
+    try std.testing.expectEqual(sbuf.len, deserialized_read);
+
+    const dbuf = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(dbuf);
 
-    cursor = 0;
-    written = 0;
+    const deserializedx = api.TL.deserialize(sbuf, dbuf);
+    const deserialized = deserializedx[0];
 
-    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(sbuf.len, deserializedx[2]);
 
-    var writtenAgain: usize = 0;
+    var size_again: usize = 0;
 
-    deserialized.cloneSize(&writtenAgain);
+    deserialized.cloneSize(&size_again);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, size_again);
 
     switch (deserialized) {
         .RPCResult => |x| {
@@ -354,18 +387,16 @@ test "RPCResult serialization & deserialization" {
         else => unreachable,
     }
 
-    try std.testing.expectEqual(written, writtenAgain);
-
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
 
-    writtenAgain = 0;
+    size_again = 0;
 
-    const clone = deserialized.clone(clonebuf, &writtenAgain);
+    const clone = deserialized.clone(clonebuf);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, clone[1]);
 
-    switch (clone) {
+    switch (clone[0]) {
         .RPCResult => |x| {
             try std.testing.expectEqual(929437432873425453, x.req_msg_id);
 
@@ -385,39 +416,40 @@ test "Vector long deserialization" {
 
     // I haven't implement a "serialize" function for the vector type, so we do the worst hack possible
 
-    const baseob = api.ProtoResPQ{ .nonce = 0, .pq = "", .server_nonce = 0, .server_public_key_fingerprints = &[_]i64{ 432423342, 45346, 897225, 4543 } };
+    const baseob = api.ProtoResPQ{ .nonce = 0, .pq = "", .server_nonce = 0, .server_public_key_fingerprints = &[_]u64{ 999900000000, 45346, 897225, 4543 } };
 
-    var sbuf = try std.testing.allocator.alloc(u8, baseob.serializedSize());
+    var sbuf = try std.testing.allocator.alloc(u8, baseob.serializeSize());
     defer std.testing.allocator.free(sbuf);
 
-    var written = baseob.serialize(sbuf);
+    const ser_size = baseob.serialize(sbuf);
 
-    const xsbuf = sbuf[4 + 36 .. written];
+    const xsbuf = sbuf[36..ser_size];
 
-    written = 0;
-    var cursor: usize = 0;
+    var size: usize = 0;
 
-    api.TL.deserializedSize(xsbuf, &cursor, &written);
+    const deser_read = api.TL.deserializeSize(xsbuf, &size);
 
-    const dbuf = try std.testing.allocator.alloc(u8, written);
+    try std.testing.expectEqual(xsbuf.len, deser_read);
+
+    const dbuf = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(dbuf);
 
-    written = 0;
-    cursor = 0;
+    const deserializedx = api.TL.deserialize(xsbuf, dbuf);
+    const deserialized = deserializedx[0];
 
-    const deserialized = api.TL.deserialize(xsbuf, dbuf, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(ser_size - 36, deserializedx[2]);
+    var size_again: usize = 0;
 
-    var writtenAgain: usize = 0;
+    deserialized.cloneSize(&size_again);
 
-    deserialized.cloneSize(&writtenAgain);
-
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, size_again);
 
     switch (deserialized) {
         .Vector => {
             const vector = deserialized.Vector;
             try std.testing.expectEqual(4, vector.elements.len);
-            try std.testing.expectEqual(432423342, vector.elements[0].Long);
+            try std.testing.expectEqual(999900000000, vector.elements[0].Long);
             try std.testing.expectEqual(45346, vector.elements[1].Long);
             try std.testing.expectEqual(897225, vector.elements[2].Long);
             try std.testing.expectEqual(4543, vector.elements[3].Long);
@@ -425,19 +457,19 @@ test "Vector long deserialization" {
         else => unreachable,
     }
 
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
 
-    writtenAgain = 0;
-    const cloned = deserialized.clone(clonebuf, &writtenAgain);
+    size_again = 0;
+    const cloned = deserialized.clone(clonebuf);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, cloned[1]);
 
-    switch (cloned) {
+    switch (cloned[0]) {
         .Vector => {
-            const vector = deserialized.Vector;
+            const vector = cloned[0].Vector;
             try std.testing.expectEqual(4, vector.elements.len);
-            try std.testing.expectEqual(432423342, vector.elements[0].Long);
+            try std.testing.expectEqual(999900000000, vector.elements[0].Long);
             try std.testing.expectEqual(45346, vector.elements[1].Long);
             try std.testing.expectEqual(897225, vector.elements[2].Long);
             try std.testing.expectEqual(4543, vector.elements[3].Long);
@@ -447,33 +479,35 @@ test "Vector long deserialization" {
 }
 
 test "Dynamic constructor" {
-    const constructor = api.InvokeWithLayer{ .layer = 149, .query = api.TL{ .InvokeWithTakeout = &api.InvokeWithTakeout{ .takeout_id = 45, .query = .{ .InputUserSelf = &api.InputUserSelf{} } } } };
+    const constructor = api.TL{ .InvokeWithLayer = &api.InvokeWithLayer{ .layer = 149, .query = api.TL{ .InvokeWithTakeout = &api.InvokeWithTakeout{ .takeout_id = 45, .query = .{ .InputUserSelf = &api.InputUserSelf{} } } } } };
 
-    var sbuf = try std.testing.allocator.alloc(u8, constructor.serializedSize());
+    const sbuf = try std.testing.allocator.alloc(u8, constructor.serializeSize());
     defer std.testing.allocator.free(sbuf);
 
-    var written = constructor.serialize(sbuf);
+    const ser_size = constructor.serialize(sbuf);
 
-    sbuf = sbuf[0..written];
+    try std.testing.expectEqual(sbuf.len, ser_size);
 
-    var cursor: usize = 0;
-    written = 0;
+    var size: usize = 0;
 
-    api.TL.deserializedSize(sbuf, &cursor, &written);
+    const deser_size = api.TL.deserializeSize(sbuf, &size);
+    try std.testing.expectEqual(ser_size, deser_size);
 
-    const dbuf = try std.testing.allocator.alloc(u8, written);
+    const dbuf = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(dbuf);
 
-    cursor = 0;
-    written = 0;
+    const deserializedx = api.TL.deserialize(sbuf, dbuf);
 
-    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+    const deserialized = deserializedx[0];
 
-    var writtenAgain: usize = 0;
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(ser_size, deserializedx[2]);
 
-    deserialized.cloneSize(&writtenAgain);
+    var size_again: usize = 0;
 
-    try std.testing.expectEqual(written, writtenAgain);
+    deserialized.cloneSize(&size_again);
+
+    try std.testing.expectEqual(size, size_again);
 
     switch (deserialized) {
         .InvokeWithLayer => |x| {
@@ -493,15 +527,14 @@ test "Dynamic constructor" {
         else => unreachable,
     }
 
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
-    writtenAgain = 0;
 
-    const clone = deserialized.clone(clonebuf, &writtenAgain);
+    const clone = deserialized.clone(clonebuf);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, clone[1]);
 
-    switch (clone) {
+    switch (clone[0]) {
         .InvokeWithLayer => |x| {
             try std.testing.expectEqual(149, x.layer);
 
@@ -520,46 +553,31 @@ test "Dynamic constructor" {
     }
 }
 
-test "asdadsadsa" {
-    const baseob = api.ProtoResPQ{ .nonce = 0, .pq = "", .server_nonce = 0, .server_public_key_fingerprints = &[_]i64{ 432423342, 45346, 897225, 4543 } };
+test "vectors of strings" {
+    const obj = api.TL{ .ChannelAdminLogEventActionChangeUsernames = &.{ .prev_value = &[_][]const u8{"test"}, .new_value = &[_][]const u8{ "test2", "hieveryone!!!!!!!!!!" } } };
+
+    const sbuf = try std.testing.allocator.alloc(u8, obj.serializeSize());
+    defer std.testing.allocator.free(sbuf);
+
+    const ser_size = obj.serialize(sbuf);
+
+    try std.testing.expectEqual(sbuf.len, ser_size);
 
     var size: usize = 0;
 
-    baseob.cloneSize(&size);
+    const deser_read = api.TL.deserializeSize(sbuf, &size);
 
-    const buf = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(buf);
-    size = 0;
+    try std.testing.expectEqual(sbuf.len, deser_read);
 
-    const r = baseob.clone(buf, &size);
-
-    try std.testing.expectEqualStrings(baseob.pq, r.pq);
-}
-
-test "vectors of strings" {
-    const obj = api.ChannelAdminLogEventActionChangeUsernames{ .prev_value = &[_][]const u8{"test"}, .new_value = &[_][]const u8{ "test2", "hieveryone!!!!!!!!!!" } };
-
-    var sbuf = try std.testing.allocator.alloc(u8, obj.serializedSize());
-    defer std.testing.allocator.free(sbuf);
-
-    var written = obj.serialize(sbuf);
-
-    sbuf = sbuf[0..written];
-
-    var cursor: usize = 0;
-
-    written = 0;
-
-    api.TL.deserializedSize(sbuf, &cursor, &written);
-
-    const dbuf = try std.testing.allocator.alloc(u8, written);
+    const dbuf = try std.testing.allocator.alloc(u8, size);
     defer std.testing.allocator.free(dbuf);
 
-    cursor = 0;
+    const deserializedx = api.TL.deserialize(sbuf, dbuf);
 
-    written = 0;
+    const deserialized = deserializedx[0];
 
-    const deserialized = api.TL.deserialize(sbuf, dbuf, &cursor, &written);
+    try std.testing.expectEqual(size, deserializedx[1]);
+    try std.testing.expectEqual(ser_size, deserializedx[2]);
 
     switch (deserialized) {
         .ChannelAdminLogEventActionChangeUsernames => |x| {
@@ -570,22 +588,20 @@ test "vectors of strings" {
         else => unreachable,
     }
 
-    var writtenAgain: usize = 0;
+    var size_again: usize = 0;
 
-    deserialized.cloneSize(&writtenAgain);
+    deserialized.cloneSize(&size_again);
 
-    try std.testing.expectEqual(written, writtenAgain);
+    try std.testing.expectEqual(size, size_again);
 
-    const clonebuf = try std.testing.allocator.alloc(u8, writtenAgain);
+    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
     defer std.testing.allocator.free(clonebuf);
 
-    writtenAgain = 0;
+    const clone = deserialized.clone(clonebuf);
 
-    const clone = deserialized.clone(clonebuf, &writtenAgain);
+    try std.testing.expectEqual(size, clone[1]);
 
-    try std.testing.expectEqual(written, writtenAgain);
-
-    switch (clone) {
+    switch (clone[0]) {
         .ChannelAdminLogEventActionChangeUsernames => |x| {
             try std.testing.expectEqualStrings("test", x.prev_value[0]);
             try std.testing.expectEqualStrings("test2", x.new_value[0]);

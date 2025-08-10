@@ -45,7 +45,7 @@ pub const NetworkDataProvider = struct {
 
     /// Asks the upper layer ideally how much data it should read.
     ///
-    /// Note: do not enforce the exact size provided by this function, as the upper layer may and will send more or less data.
+    /// Note: do not enforce the exact size provided by this function, as the lower layer may and will send more or less data.
     pub inline fn suggestedRecvSize(self: NetworkDataProvider) usize {
         return self.vtable.suggestedRecvSizeFn(self.ptr);
     }

@@ -109,10 +109,10 @@ pub const TLConstructor = struct {
 
                 if (parameter.type) |t| {
                     switch (t) {
-                        parameters_type.TLParameterTypeTag.Flags => {
+                        .Flags => {
                             try flag_defs.append(try allocator.dupe(u8, parameter.name));
                         },
-                        parameters_type.TLParameterTypeTag.Normal => {
+                        .Normal => {
                             if (t.Normal.type.generic_ref) {
                                 var found = false;
                                 for (type_defs.items) |item| {

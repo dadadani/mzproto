@@ -1,4 +1,4 @@
-const xev = @import("xev");
+const xev = @import("xev").Dynamic;
 const std = @import("std");
 
 const tl = @import("lib/tl/api.zig");
@@ -16,7 +16,7 @@ var tcp: xev.TCP = undefined;
 
 var authGen: AuthKey.AuthGen = undefined;
 const allocoso = ge.allocator();
-var connection = struct { queue: xev.TCP.WriteQueue = undefined, completion: xev.Completion = undefined, transport: Abridged = Abridged{
+var connection = struct { queue: xev.WriteQueue = undefined, completion: xev.Completion = undefined, transport: Abridged = Abridged{
     .allocator = ge.allocator(),
 }, readBuf: []u8 = &[0]u8{} }{};
 
@@ -54,7 +54,7 @@ fn onTcpData(
 const WriteSession = struct {
     completion: xev.Completion = undefined,
     data: []u8 = undefined,
-    writeRequest: xev.TCP.WriteRequest = undefined,
+    writeRequest: xev.WriteRequest = undefined,
 };
 
 fn onDataWritten(
@@ -154,6 +154,7 @@ fn connectedCb(ud: ?*void, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.
 }
 
 pub fn main() !void {
+    std.debug.print("sizeof: {}", .{@sizeOf(tl.TL)});
     defer {
         switch (ge.deinit()) {
             std.heap.Check.leak => std.log.err("Memory leak detected", .{}),
@@ -175,7 +176,7 @@ pub fn main() !void {
 const XevNetworkDataProvider = struct {
     tcp: ?xev.TCP,
     loop: *xev.Loop,
-    networkDataProvider: NetworkDataProvider.NetworkDataProvider,
+    networkDataProvider: ?NetworkDataProvider.NetworkDataProvider,
     completion: xev.Completion,
 
     fn xevConnected(
@@ -195,6 +196,26 @@ const XevNetworkDataProvider = struct {
         };
 
         self.networkDataProvider.sendEvent(.Connected);
+
+        return .disarm;
+    }
+
+    fn xevClosed(
+        self: ?*@This(),
+        l: *xev.Loop,
+        c: *xev.Completion,
+        s: xev.TCP,
+        r: xev.CloseError!void,
+    ) xev.CallbackAction {
+        _ = l;
+        _ = c;
+        _ = s;
+
+        r catch {
+            unreachable;
+        };
+
+        self.networkDataProvider.sendEvent(.Disconnected);
 
         return .disarm;
     }
@@ -250,9 +271,7 @@ const XevNetworkDataProvider = struct {
                     return;
                 }
 
-                self.tcp.?.close(
-                    self.loop,
-                );
+                self.tcp.?.close(self.loop, self.completion, XevNetworkDataProvider, self, xevClosed);
             },
         }
     }

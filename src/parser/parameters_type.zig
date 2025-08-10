@@ -4,9 +4,7 @@ const std = @import("std");
 
 pub const ParseParameterError = error{Empty};
 
-pub const TLParameterTypeTag = enum { Flags, Normal };
-
-pub const TLParameterType = union(TLParameterTypeTag) {
+pub const TLParameterType = union(enum) {
     Flags: struct {},
 
     Normal: struct {

@@ -60,7 +60,6 @@ pub const TlIterator = struct {
             if (std.mem.startsWith(u8, cn, "---")) {
                 if (std.mem.startsWith(u8, cn, FUNCTIONS_SEPARATOR)) {
                     self.section = sections.TLSection.Functions;
-                    std.debug.print("cn -> {s}\n", .{cn[FUNCTIONS_SEPARATOR.len..]});
                     break :parse utils.trimWhitespace(std.mem.trimLeft(u8, cn, FUNCTIONS_SEPARATOR));
                 } else if (std.mem.startsWith(u8, cn, TYPES_SEPARATOR)) {
                     self.section = sections.TLSection.Types;
@@ -71,8 +70,6 @@ pub const TlIterator = struct {
             }
             break :parse cn;
         };
-
-        std.debug.print("cna -> {s}\n", .{parse});
 
         return try constructor.TLConstructor.parse(self.allocator, parse, self.section);
     }
