@@ -193,7 +193,6 @@ pub const AuthGen = struct {
                 }
                 const resPQ = d.data.ProtoResPQ;
                 if (resPQ.nonce != self.nonce) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.Security);
                     return;
@@ -214,7 +213,6 @@ pub const AuthGen = struct {
                     }
                 }
 
-
                 if (self.public_key == null) {
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.UnknownFingerprints);
@@ -222,7 +220,13 @@ pub const AuthGen = struct {
                 }
 
                 // calulate factors from pq
-                const p, const q = factorize(std.mem.readInt(u64, resPQ.pq[0..8], .big));
+                const p_q = factorize(std.mem.readInt(u64, resPQ.pq[0..8], .big));
+                if (p_q == null) {
+                    self.status = .Failed;
+                    self.callback(self.user_data, GenError.Security);
+                    return;
+                }
+                const p, const q = p_q.?;
 
                 self.new_nonce = std.crypto.random.int(u256);
 
@@ -260,9 +264,7 @@ pub const AuthGen = struct {
                 self.status = .ReqDH;
             },
             .ReqDH => {
-
                 if (d.data != .ProtoServerDHParamsOk) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.FailedReqDH);
                     return;
@@ -271,14 +273,12 @@ pub const AuthGen = struct {
                 const dhParamsOk = d.data.ProtoServerDHParamsOk;
 
                 if (dhParamsOk.nonce != self.nonce) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.Security);
                     return;
                 }
 
                 if (dhParamsOk.server_nonce != self.server_nonce) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.Security);
                     return;
@@ -353,14 +353,12 @@ pub const AuthGen = struct {
                 const dhInnerData = deser[0].ProtoServerDHInnerData;
 
                 if (dhInnerData.nonce != self.nonce) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.Security);
                     return;
                 }
 
                 if (dhInnerData.server_nonce != self.server_nonce) {
-
                     self.status = .Failed;
                     self.callback(self.user_data, GenError.Security);
                     return;
@@ -449,7 +447,6 @@ pub const AuthGen = struct {
             .setClientDH => {
                 switch (d.data) {
                     .ProtoDhGenOk => {
-
                         var result = GeneratedAuthKey{
                             .authKey = undefined,
                             .firstSalt = 0,
@@ -481,7 +478,6 @@ pub const AuthGen = struct {
                         const computed_hash = std.mem.readInt(u128, hash2[4..], .little);
 
                         if (computed_hash != d.data.ProtoDhGenOk.new_nonce_hash1) {
-
                             self.status = .Failed;
                             self.callback(self.user_data, GenError.Security);
                             return;
