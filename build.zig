@@ -106,6 +106,10 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
 
+    // //////////////////////////////////
+    // //////////////////////////////////
+    // //////////////////////////////////
+
     const generate_tl = b.step("generate-tl", "Generate TL schema");
 
     const tl_gen_exe = b.addExecutable(.{
@@ -136,6 +140,34 @@ pub fn build(b: *std.Build) void {
 
     const run_tl_gen = b.addRunArtifact(tl_gen_exe);
     generate_tl.dependOn(&run_tl_gen.step);
+
+    // //////////////////////////////////
+    // //////////////////////////////////
+    // //////////////////////////////////
+
+    const maybe_xev = b.lazyDependency("libxev", .{ .target = target, .optimize = .ReleaseSafe });
+    if (maybe_xev) |xev| {
+        const dev_step = b.step("dev", "dev wip");
+
+        const dev_exe = b.addExecutable(.{
+            .name = "dev",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/dev_remove_later.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "mzproto", .module = mod },
+                    .{ .name = "xev", .module = xev.module("xev") },
+                },
+            }),
+        });
+
+        const install_dev = b.addInstallArtifact(dev_exe, .{});
+        dev_step.dependOn(&install_dev.step);
+    }
+    // //////////////////////////////////
+    // //////////////////////////////////
+    // //////////////////////////////////
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.
