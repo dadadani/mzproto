@@ -1,3 +1,17 @@
+//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
+//
+//   Licensed under the Apache License, Version 2.0 (the "License");
+//   you may not use this file except in compliance with the License.
+//   You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+//   Unless required by applicable law or agreed to in writing, software
+//   distributed under the License is distributed on an "AS IS" BASIS,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//   See the License for the specific language governing permissions and
+//   limitations under the License.
+
 const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
 const parser = @import("../parser/parse.zig");
@@ -39,8 +53,27 @@ fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !std.ArrayList(
 pub fn boilerplate(writer: *std.io.Writer) !void {
     if (try findLayer("schema/api.tl")) |layer| {
         _ = try writer.print(
-            \\// mzproto - generated tl
-            \\// Do not modify it manually.
+            \\//! Provides low-level, zero-allocation bindings for the Telegram (TL) API schema.
+            \\//! This module contains all the data types and functions needed to serialize and
+            \\//! deserialize objects for communication with the Telegram servers.
+            \\//!
+            \\//! **WARNING**: This is an auto-generated file based on Telegram's API Layer `LAYER_VERSION`.
+            \\//! Do not edit it directly, as your changes will be overwritten by the generator.
+            \\//!
+            \\//! - **No Hidden Allocations:** Functions like `serialize`, `deserialize`, and `clone`
+            \\//!   do not allocate memory. Instead, they write their results into a buffer that
+            \\//!   you provide.
+            \\//!
+            \\//! - **Buffer Sizing:** Before calling an operation, you may determine the required buffer size using 
+            \\//!   the corresponding `*Size` function for this:
+            \\//!   - `serializeSize()`
+            \\//!   - `deserializeSize()`
+            \\//!   - `cloneSize()`
+            \\//!
+            \\//!   These functions guarantee to return a size sufficient for the subsequent operation.
+            \\//!
+            \\//! For a comprehensive example of how to use this API, please see the
+            \\//! `api_tests.zig` file.
             \\
             \\const base = @import("base.zig");
             \\const std = @import("std");
