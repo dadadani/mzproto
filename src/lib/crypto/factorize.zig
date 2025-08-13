@@ -46,9 +46,9 @@ pub fn factorize(pq: u64) ?struct { u64, u64 } {
     return .{ p, q };
 }
 
-pub fn factors(pq: u64) u64 {
-    var random = RandomState{};
+threadlocal var random = RandomState{};
 
+pub fn factors(pq: u64) u64 {
     var y = random.next() % (pq - 1) + 1;
     const c = random.next() % (pq - 1) + 1;
 
