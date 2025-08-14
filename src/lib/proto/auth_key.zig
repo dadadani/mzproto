@@ -12,19 +12,19 @@
 //   See the License for the specific language governing permissions and
 //   limitations under the License.
 
-const tl = @import("../tl//api.zig");
+const tl = @import("../tl/api.zig");
 const std = @import("std");
 const factorize = @import("../crypto/factorize.zig").factorize;
 const TransportProvider = @import("../network/transport_provider.zig").TransportProvider;
 const ConnectionEvent = @import("../network/network_data_provider.zig").ConnectionEvent;
 const RecvDataCallback = @import("../network/transport_provider.zig").RecvDataCallback;
 const ige = @import("../crypto/ige.zig").ige;
-const modPow = @import("../crypto/exp.zig").modpow;
 
 pub const GenError = error{
     ConnectionClosed,
     InvalidResponse,
     Security,
+    ModulusFailure,
     FailedResPQ,
     FailedReqDH,
     FailedSetClientDH,
@@ -71,7 +71,7 @@ pub const AuthGen = struct {
     new_nonce: u256 = 0,
     public_key: ?struct { u2048, u64 } = null,
     gA: u2048 = 0,
-    b: u2048 = 0,
+    b: [256]u8 = undefined,
     dhPrime: u2048 = 0,
 
     const Modulus = std.crypto.ff.Modulus(2048);
@@ -106,8 +106,9 @@ pub const AuthGen = struct {
             return GenError.Security;
         }
     }
-
-    fn rsaPad(src: []const u8, m: u2048, e: u64) [256]u8 {
+    
+    /// RSA_PAD is a version of RSA with a variant of OAEP+ padding
+    fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
         std.debug.assert(src.len <= 144);
 
         var result: [256]u8 = undefined;
@@ -144,23 +145,23 @@ pub const AuthGen = struct {
         }
 
         const a = Modulus.fromPrimitive(u2048, m) catch {
-            @panic("fromPrimitive failed");
+            return GenError.ModulusFailure;
         };
 
         const b = Modulus.Fe.fromPrimitive(u64, a, e) catch {
-            @panic("fromPrimitive failed");
+            return GenError.ModulusFailure;
         };
 
         const c = Modulus.Fe.fromPrimitive(u2048, a, encrypted_int) catch {
-            @panic("fromPrimitive failed");
+            return GenError.ModulusFailure;
         };
 
         const rsa = a.powPublic(c, b) catch {
-            @panic("powPublic failed");
+            return GenError.ModulusFailure;
         };
 
         rsa.toBytes(&result, .big) catch {
-            @panic("toBytes failed");
+            return GenError.ModulusFailure;
         };
 
         return result;
@@ -249,7 +250,11 @@ pub const AuthGen = struct {
                 const innerData = tl.TL{ .ProtoPQInnerDataDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
                 var written = innerData.serialize(&sbuf);
 
-                const bytes = rsaPad(sbuf[0..written], self.public_key.?[0], self.public_key.?[1]);
+                const bytes = rsaPad(sbuf[0..written], self.public_key.?[0], self.public_key.?[1]) catch |err| {
+                    self.status = .Failed;
+                    self.callback(self.user_data, err);
+                    return;
+                };
 
                 var reqDH: [500]u8 = undefined;
 
@@ -259,6 +264,7 @@ pub const AuthGen = struct {
                 self.sendData(reqDH[0..written]) catch |err| {
                     self.status = .Failed;
                     self.callback(self.user_data, err);
+                    return;
                 };
 
                 self.status = .ReqDH;
@@ -366,9 +372,31 @@ pub const AuthGen = struct {
 
                 self.dhPrime = std.mem.readInt(u2048, dhInnerData.dh_prime[0..256], .big);
                 self.gA = std.mem.readInt(u2048, dhInnerData.g_a[0..256], .big);
-                self.b = std.crypto.random.int(u2048);
+                std.crypto.random.bytes(&self.b);
 
-                const gB = modPow(@intCast(dhInnerData.g), self.b, self.dhPrime);
+                var m = Modulus.fromPrimitive(u2048, self.dhPrime) catch {
+                    self.status = .Failed;
+                    self.callback(self.user_data, GenError.ModulusFailure);
+                    return;
+                };
+
+                const x = Modulus.Fe.fromPrimitive(u32, m, dhInnerData.g) catch {
+                    self.status = .Failed;
+                    self.callback(self.user_data, GenError.ModulusFailure);
+                    return;
+                };
+
+                const gB_m = m.powWithEncodedPublicExponent(x, &self.b, .little) catch {
+                    self.status = .Failed;
+                    self.callback(self.user_data, GenError.ModulusFailure);
+                    return;
+                };
+
+                const gB = gB_m.toPrimitive(u2048) catch {
+                    self.status = .Failed;
+                    self.callback(self.user_data, GenError.ModulusFailure);
+                    return;
+                };
 
                 rangeCheck(@intCast(dhInnerData.g), 1, (self.dhPrime - 1)) catch |err| {
                     self.status = .Failed;
@@ -459,9 +487,29 @@ pub const AuthGen = struct {
 
                         result.firstSalt = std.mem.readInt(u64, result.authKey[0..8], .little) ^ std.mem.readInt(u64, serverNonce[0..8], .little);
 
-                        const key = modPow(self.gA, self.b, self.dhPrime);
+                        var m = Modulus.fromPrimitive(u2048, self.dhPrime) catch {
+                            self.status = .Failed;
+                            self.callback(self.user_data, GenError.ModulusFailure);
+                            return;
+                        };
 
-                        std.mem.writeInt(u2048, &result.authKey, @intCast(key), .big);
+                        const x = Modulus.Fe.fromPrimitive(u2048, m, self.gA) catch {
+                            self.status = .Failed;
+                            self.callback(self.user_data, GenError.ModulusFailure);
+                            return;
+                        };
+
+                        const key_m = m.powWithEncodedPublicExponent(x, &self.b, .little) catch {
+                            self.status = .Failed;
+                            self.callback(self.user_data, GenError.ModulusFailure);
+                            return;
+                        };
+
+                        key_m.toBytes(&result.authKey, .big) catch {
+                            self.status = .Failed;
+                            self.callback(self.user_data, GenError.ModulusFailure);
+                            return;
+                        };
 
                         var hash: [20]u8 = undefined;
                         std.crypto.hash.Sha1.hash(&result.authKey, &hash, .{});

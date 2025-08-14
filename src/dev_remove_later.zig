@@ -135,13 +135,15 @@ fn read(conn: xev.TCP) !void {
     conn.read(&loop, &connection.completion, xev.ReadBuffer{ .slice = connection.readBuf }, @TypeOf(connection), &connection, onTcpData);
 }
 
+var timer: std.time.Timer = undefined;
+
 fn GeneratedKey(ptr: *const anyopaque, res: AuthKey.GenError!AuthKey.GeneratedAuthKey) void {
     _ = ptr;
     _ = res catch |err| {
         std.log.err("Failed to generate key: {}", .{err});
         return;
     };
-    std.log.info("Generated key:.....\n", .{});
+    std.log.info("Generated key: took {d} ms\n", .{timer.read() / std.time.ns_per_ms});
 }
 
 fn connectedCb(ud: ?*void, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.ConnectError!void) xev.CallbackAction {
@@ -162,6 +164,9 @@ fn connectedCb(ud: ?*void, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.
     };
 
     authGen = AuthKey.AuthGen{ .allocator = allocoso, .connection = connection.transport.transportProvider(), .callback = GeneratedKey, .user_data = &connection, .dcId = 2, .testMode = true, .media = false };
+    timer = std.time.Timer.start() catch {
+        @panic("Failed to start timer");
+    };
     authGen.start();
 
     return .disarm;
