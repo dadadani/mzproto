@@ -15,9 +15,7 @@
 const tl = @import("../tl/api.zig");
 const std = @import("std");
 const factorize = @import("../crypto/factorize.zig").factorize;
-const TransportProvider = @import("../network/transport_provider.zig").TransportProvider;
-const ConnectionEvent = @import("../network/network_data_provider.zig").ConnectionEvent;
-const RecvDataCallback = @import("../network/transport_provider.zig").RecvDataCallback;
+
 const ige = @import("../crypto/ige.zig").ige;
 
 pub const GenError = error{
@@ -51,7 +49,6 @@ const Deserialized = struct {
 
 pub const AuthGen = struct {
     allocator: std.mem.Allocator,
-    connection: TransportProvider,
     dcId: u8,
     testMode: bool,
     media: bool,
@@ -74,6 +71,9 @@ pub const AuthGen = struct {
     b: [256]u8 = undefined,
     dhPrime: u2048 = 0,
 
+    writeDataCtx: *anyopaque,
+    writeData: *const fn (self: *anyopaque, data: []const u8) void,
+
     const Modulus = std.crypto.ff.Modulus(2048);
 
     fn deserialize(self: *AuthGen, data: []const u8) std.mem.Allocator.Error!Deserialized {
@@ -88,25 +88,12 @@ pub const AuthGen = struct {
         return .{ .ptr = dest, .data = des[0] };
     }
 
-    fn onEvent(event: ConnectionEvent, ptr: ?*const anyopaque) void {
-        const self: *AuthGen = @ptrCast(@alignCast(@constCast(ptr.?)));
-        switch (event) {
-            ConnectionEvent.Connected => {},
-            ConnectionEvent.Disconnected => {
-                self.callback(self.user_data, GenError.ConnectionClosed);
-            },
-            ConnectionEvent.ConnectError => {
-                self.callback(self.user_data, GenError.ConnectionClosed);
-            },
-        }
-    }
-
     inline fn rangeCheck(val: u2048, min: u2048, max: u2048) !void {
         if (!(min < val and val < max)) {
             return GenError.Security;
         }
     }
-    
+
     /// RSA_PAD is a version of RSA with a variant of OAEP+ padding
     fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
         std.debug.assert(src.len <= 144);
@@ -167,9 +154,7 @@ pub const AuthGen = struct {
         return result;
     }
 
-    fn onData(data: []u8, ptr: ?*const anyopaque) void {
-        const self: *AuthGen = @ptrCast(@alignCast(@constCast(ptr.?)));
-
+    pub fn onData(self: *AuthGen, data: []const u8) void {
         if (data.len == 4) {
             //const code = std.mem.readInt(i32, data[0..4], .little);
             self.status = .Failed;
@@ -558,20 +543,16 @@ pub const AuthGen = struct {
         std.mem.writeInt(i64, buf[8..16], std.time.milliTimestamp() << 32, .little);
         std.mem.writeInt(i32, buf[16..20], @intCast(data.len), .little);
         @memcpy(buf[20..], data);
-        self.connection.sendData(buf);
+        self.writeData(self.writeDataCtx, buf);
     }
 
     pub fn start(self: *AuthGen) void {
-        self.connection.setUserData(self);
-        self.connection.setRecvEventCallback(onEvent);
-        self.connection.setRecvDataCallback(onData);
-
         self.status = .ReqPQ;
 
         self.nonce = std.crypto.random.int(u128);
         var data: [tl.TL.serializeSize(&tl.TL{ .ProtoReqPqMulti = &.{ .nonce = 0 } })]u8 = undefined;
         const written = tl.TL.serialize(&.{ .ProtoReqPqMulti = &.{ .nonce = self.nonce } }, &data);
-
+        std.debug.print("sending some auth data...d.s.das.\n", .{});
         self.sendData(data[0..written]) catch |err| {
             self.status = .Failed;
             self.callback(self.user_data, err);

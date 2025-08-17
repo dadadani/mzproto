@@ -1,42 +1,20 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
+//! MTProto "abridged" framing transport.
+//! - Outbound framing: send 0xEF once on first Connect; then for each message:
+//!   - if (len/4) < 0x7F: emit 1 byte length (len/4), followed by body
+//!   - else: emit 0x7F + 3-byte little-endian (len/4), followed by body
+//! - Inbound parsing: state machine reading length (short or extended) then body.
+//! This layer sits above a byte-stream transport (e.g. TCP) and exposes its own
+//! TransportReader/Writer. It requires a lower-level writer to send frames.
 
+const transport = @import("transport.zig");
 const std = @import("std");
 
-pub const NetworkDataProvider = @import("network_data_provider.zig").NetworkDataProvider;
-pub const SendCallbackFn = @import("network_data_provider.zig").SendCallbackFn;
-pub const ConnectionEvent = @import("network_data_provider.zig").ConnectionEvent;
-
-pub const TransportProvider = @import("transport_provider.zig").TransportProvider;
-pub const RecvDataCallback = @import("transport_provider.zig").RecvDataCallback;
-pub const RecvEventCallback = @import("transport_provider.zig").RecvEventCallback;
-pub const ConnectionInfo = @import("transport_provider.zig").ConnectionInfo;
-
-pub const TransportEvent = @import("transport_provider.zig").TransportEvent;
-pub const TransportRecvEventCallback = @import("network_data_provider.zig").RecvEventCallback;
-
-/// Abridged Protocol
-///
-/// See https://core.telegram.org/mtproto/mtproto-transports#abridged
-pub const Abridged = struct {
+/// Implements abridged framing with a small receive state machine.
+const Abridged = struct {
     allocator: std.mem.Allocator,
-    recvDataCallback: ?*const RecvDataCallback = null,
-    recvEventCallback: ?*const RecvEventCallback = null,
-    transport_user_data: ?*const anyopaque = null,
 
     read_status: enum { ReadingLength, ReadingLengthExtended, ReadingBody, Terminated } = .ReadingLength,
-    connection_open: bool = false,
+    connection_status: enum { Uninitialized, Connected, Connecting, Terminating } = .Connecting,
 
     read_buf: []u8 = &[_]u8{},
     read_len_net: usize = 0,
@@ -44,28 +22,175 @@ pub const Abridged = struct {
     extended_len_buf: [4]u8 = undefined,
     extended_len_read: u4 = 0,
 
-    net_user_data: ?*const anyopaque = null,
-    netSendCallback: ?*const SendCallbackFn = null,
+    reader: ?transport.TransportReader = null,
+    writer: ?transport.TransportWriter = null,
 
-    transportEventCallback: ?*const TransportRecvEventCallback = null,
+    terminate_ctx: ?*anyopaque = null,
+    terminate_cb: ?*const (fn (self: ?*anyopaque) void) = null,
 
-    connecton_info: ConnectionInfo = undefined,
+    pub fn transportControl(self_local: *Abridged) transport.TransportControl {
+        const control = struct {
+            fn setWriter(self_ptr: *anyopaque, writer: transport.TransportWriter) void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                self.writer = writer;
+            }
 
-    pub fn deinit(self: *Abridged) void {
-        if (self.read_buf.len > 0) {
-            self.allocator.free(self.read_buf);
-        }
-        if (self.netSendCallback) |func| {
-            func(null, self.net_user_data);
-        }
-        self.read_status = .Terminated;
+            fn setReader(self_ptr: *anyopaque, reader: transport.TransportReader) void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                self.reader = reader;
+            }
+
+            /// Begin graceful teardown. If already torn down, no-ops.
+            fn deinit(self_ptr: *anyopaque, ctx: ?*anyopaque, cb: *const (fn (self: ?*anyopaque) void)) void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                if (self.connection_status == .Uninitialized or (self.connection_status == .Terminating and self.read_status == .Terminated)) {
+                    return;
+                }
+
+                if (self.writer) |writer| {
+                    writer.control(.{ .Disconnect = .{} });
+                } else {
+                    self.allocator.destroy(self);
+                    cb(ctx);
+                    return;
+                }
+
+                if (self.read_buf.len > 0) {
+                    self.allocator.free(self.read_buf);
+                }
+
+                self.terminate_ctx = ctx;
+                self.terminate_cb = cb;
+            }
+        };
+
+        return .{ .vtable = .{
+            .ctx = self_local,
+            .deinit = control.deinit,
+            .setReader = control.setReader,
+            .setWriter = control.setWriter,
+        } };
     }
 
-    pub fn networkProvider(s: *Abridged) NetworkDataProvider {
-        const vtable = struct {
-            fn netRecv(ptr: *anyopaque, src: []const u8) !void {
+    /// Writer exposed to upper layers; frames data per abridged rules and
+    /// forwards it to the lower layer writer.
+    pub fn transportWriter(self_local: *Abridged) transport.TransportWriter {
+        const writer = struct {
+            fn send(self_ptr: *anyopaque, data: []const u8) transport.Error!void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                if (self.connection_status != .Connected) {
+                    return transport.Error.ConnectionClosed;
+                }
+
+                if (self.writer) |writer| {
+                    const len = @as(u8, @intCast(data.len / 4));
+
+                    // If the length divided by 4 is less than 0x7F, we send it as a single byte,
+                    // otherwise, we send 0x7F followed by the length as a 3-byte little-endian integer.
+                    if (len < 0x7F) {
+                        try writer.send(&[1]u8{len});
+                        try writer.send(data);
+                    } else {
+                        var buf: [5]u8 = undefined;
+                        buf[0] = 0x7F;
+                        std.mem.writeInt(u32, buf[1..], @as(u32, len), .little);
+                        try writer.send(&buf);
+                        try writer.send(data);
+                    }
+                } else {
+                    return transport.Error.ConnectionClosed;
+                }
+            }
+
+            fn control(self_ptr: *anyopaque, ctrl: transport.Control) void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                _ = ctrl;
+                _ = self;
+            }
+        };
+
+        return .{ .vtable = .{
+            .control = writer.control,
+            .ctx = self_local,
+            .send = writer.send,
+        } };
+    }
+
+    /// Reader exposed to lower layers; parses stream into framed messages.
+    pub fn transportReader(self_local: *Abridged) transport.TransportReader {
+        const reader = struct {
+            /// Handle connection lifecycle signals from the lower layer.
+            fn control(self_ptr: *anyopaque, ctrl: transport.Control) void {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+                if (ctrl == .Connect) {
+                    if (self.connection_status == .Terminating or self.read_status == .Terminated) {
+                        return;
+                    }
+                    if (self.connection_status == .Connected) {
+                        return;
+                    }
+
+                    // Send abridged magic byte once on connect.
+                    if (self.writer) |writer| {
+                        writer.send(&[1]u8{0xef}) catch {
+                            @panic("TODO: implement failure writer");
+                        };
+                    }
+
+                    self.connection_status = .Connected;
+                    if (self.reader) |reader| {
+                        reader.control(.{ .Connect = .{} });
+                    }
+                }
+                if (ctrl == .ConnectError or ctrl == .Disconnect) {
+                    if (self.connection_status == .Terminating or self.read_status == .Terminated) {
+                        return;
+                    }
+
+                    if (self.connection_status == .Terminating and self.read_status != .Terminated) {
+                        const cbb = self.terminate_cb;
+                        const ctx = self.terminate_ctx;
+                        self.allocator.destroy(self);
+                        if (cbb) |cb| {
+                            cb(ctx);
+                        }
+                    }
+
+                    self.connection_status = .Connecting;
+                    if (self.reader) |reader| {
+                        reader.control(.{ .Disconnect = .{} });
+                    }
+                    // TODO: handle reconnection
+                }
+            }
+
+            const addr = std.net.Address.parseIp4("149.154.167.40", 443) catch {
+                unreachable;
+            };
+
+            /// Provide default connection info if not delegated from upper layer.
+            fn connectionInfo(self_ptr: *anyopaque) transport.ConnectionInfo {
+                const self: *Abridged = @ptrCast(@alignCast(self_ptr));
+
+                if (self.reader) |reader| {
+                    return reader.connectionInfo();
+                } else {
+                    return transport.ConnectionInfo{
+                        .address = addr,
+                        .dcId = 2,
+                        .media = false,
+                        .testMode = true,
+                    };
+                }
+            }
+
+            /// Consume bytes from lower layer and drive the framing state machine.
+            fn send(ptr: *anyopaque, src: []const u8) void {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 if (src.len == 0) {
+                    return;
+                }
+                if (self.connection_status == .Terminating) {
                     return;
                 }
                 switch (self.read_status) {
@@ -81,16 +206,18 @@ pub const Abridged = struct {
                             const remaining = src[1..];
 
                             if (remaining.len > 0) {
-                                try @This().netRecv(ptr, remaining);
+                                send(ptr, remaining);
                             }
                         } else {
-                            self.read_buf = try self.allocator.alloc(u8, @as(usize, src[0]) * 4);
+                            self.read_buf = self.allocator.alloc(u8, @as(usize, src[0]) * 4) catch {
+                                @panic("TODO: handle allocation failure on send");
+                            };
                             self.read_status = .ReadingBody;
 
                             const remaining = src[1..];
 
                             if (remaining.len > 0) {
-                                try @This().netRecv(ptr, remaining);
+                                send(ptr, remaining);
                             }
                         }
                     },
@@ -100,14 +227,16 @@ pub const Abridged = struct {
                             self.extended_len_read += 1;
 
                             if (src.len > 1) {
-                                try @This().netRecv(ptr, src[1..]);
+                                send(ptr, src[1..]);
                             }
                         } else {
-                            self.read_buf = try self.allocator.alloc(u8, std.mem.readInt(u32, &self.extended_len_buf, .little) * 4);
+                            self.read_buf = self.allocator.alloc(u8, std.mem.readInt(u32, &self.extended_len_buf, .little) * 4) catch {
+                                @panic("TODO: handle allocation failure on send");
+                            };
                             self.read_status = .ReadingBody;
                             self.extended_len_read = 0;
 
-                            try @This().netRecv(ptr, src);
+                            send(ptr, src);
                         }
                     },
                     .ReadingBody => {
@@ -119,8 +248,8 @@ pub const Abridged = struct {
                         self.read_len_net += incoming.len;
 
                         if (self.read_len_net == self.read_buf.len) {
-                            if (self.recvDataCallback) |func| {
-                                func(self.read_buf, self.transport_user_data);
+                            if (self.reader) |reader| {
+                                reader.send(self.read_buf);
                             }
                             self.read_status = .ReadingLength;
                             self.read_len_net = 0;
@@ -129,14 +258,15 @@ pub const Abridged = struct {
                         }
 
                         if (src[incoming.len..].len > 0) {
-                            try @This().netRecv(ptr, src[incoming.len..]);
+                            send(ptr, src[incoming.len..]);
                         }
                     },
                     .Terminated => @panic("Transport has been terminated"),
                 }
             }
 
-            fn netSuggestedRecvSize(ptr: *anyopaque) usize {
+            /// Hint for optimal next read size from the lower layer.
+            fn sendSuggested(ptr: *anyopaque) usize {
                 const self: *Abridged = @ptrCast(@alignCast(ptr));
                 switch (self.read_status) {
                     .ReadingLength => return 1,
@@ -145,174 +275,49 @@ pub const Abridged = struct {
                     .Terminated => @panic("Transport has been terminated"),
                 }
             }
-
-            fn netSetUserData(ptr: *anyopaque, user_data: ?*const anyopaque) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.net_user_data = user_data;
-            }
-
-            fn netSetSendCallback(ptr: *anyopaque, send_callback: *const SendCallbackFn) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.netSendCallback = send_callback;
-            }
-
-            fn sendEvent(ptr: *anyopaque, event: ConnectionEvent) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                defer {
-                    if (self.recvEventCallback) |recv| {
-                        recv(event, self.transport_user_data);
-                    }
-                }
-                switch (event) {
-                    .Connected => {
-                        if (self.netSendCallback == null or self.connection_open) {
-                            return;
-                        }
-                        self.connection_open = true;
-                        if (self.netSendCallback) |send| {
-                            send(&[1]u8{0xef}, self.net_user_data);
-                        }
-                    },
-                    .Disconnected => {
-                        self.connection_open = false;
-                    },
-                    .ConnectError => {
-                        self.connection_open = false;
-                    },
-                }
-            }
-
-            fn setRecvEventCallback(ptr: *anyopaque, func: *const TransportRecvEventCallback) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.transportEventCallback = func;
-            }
-
-            fn getConnectionDetails(ptr: *anyopaque) ConnectionInfo {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                return self.connecton_info;
-            }
         };
 
-        return NetworkDataProvider{ .ptr = @ptrCast(s), .vtable = .{
-            .recvFn = &vtable.netRecv,
-            .suggestedRecvSizeFn = &vtable.netSuggestedRecvSize,
-            .setUserDataFn = &vtable.netSetUserData,
-            .setSendCallbackFn = &vtable.netSetSendCallback,
-            .sendEventFn = &vtable.sendEvent,
-            .getConnectionDetails = &vtable.getConnectionDetails,
-            .setRecvEventCallback = &vtable.setRecvEventCallback,
-        } };
-    }
-
-    pub fn transportProvider(s: *Abridged) TransportProvider {
-        const vtable = struct {
-            pub fn sendData(ptr: *anyopaque, data: []const u8) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                if (self.netSendCallback) |send| {
-                    const len = @as(u8, @intCast(data.len / 4));
-
-                    // If the length divided by 4 is less than 0x7F, we send it as a single byte,
-                    // otherwise, we send 0x7F followed by the length as a 3-byte little-endian integer.
-
-                    if (len < 0x7F) {
-                        send(&[1]u8{len}, self.transport_user_data);
-                        send(data, self.transport_user_data);
-                    } else {
-                        var buf: [5]u8 = undefined;
-                        buf[0] = 0x7F;
-                        std.mem.writeInt(u32, buf[1..], @as(u32, len), .little);
-                        send(&buf, self.transport_user_data);
-                        send(data, self.transport_user_data);
-                    }
-                }
-            }
-
-            pub fn setRecvDataCallback(ptr: *anyopaque, func: *const RecvDataCallback) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.recvDataCallback = func;
-            }
-
-            pub fn setRecvEventCallback(ptr: *anyopaque, func: *const RecvEventCallback) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.recvEventCallback = func;
-            }
-
-            pub fn setUserData(ptr: *anyopaque, user_data: ?*const anyopaque) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.transport_user_data = user_data;
-            }
-
-            pub fn setConnectionInfo(ptr: *anyopaque, info: ConnectionInfo) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                self.connecton_info = info;
-            }
-
-            pub fn getConnectionDetails(ptr: *anyopaque) ConnectionInfo {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                return self.connecton_info;
-            }
-
-            pub fn sendEvent(ptr: *anyopaque, event: TransportEvent) void {
-                const self: *Abridged = @ptrCast(@alignCast(ptr));
-                if (self.transportEventCallback) |send| {
-                    send(event, self.transport_user_data);
-                }
-            }
-        };
-
-        return TransportProvider{ .ptr = @ptrCast(s), .vtable = .{
-            .sendData = &vtable.sendData,
-            .setRecvDataCallback = &vtable.setRecvDataCallback,
-            .setRecvEventCallback = &vtable.setRecvEventCallback,
-            .setUserData = &vtable.setUserData,
-            .setConnectionInfo = &vtable.setConnectionInfo,
-            .sendEvent = &vtable.sendEvent,
+        return .{ .vtable = .{
+            .ctx = self_local,
+            .control = reader.control,
+            .connectionInfo = reader.connectionInfo,
+            .send = reader.send,
+            .sendSuggested = reader.sendSuggested,
         } };
     }
 };
 
-pub fn incomingData(data: []u8, user_data: *const anyopaque) void {
-    _ = user_data;
-    std.debug.print("{d}\n", .{data});
-    std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, data) catch |x| {
-        std.debug.panic("{}", .{x});
-    };
-}
+pub const AbridgedTransportInitializer = struct {
+    allocator: std.mem.Allocator,
 
-pub fn toSendData(data: ?[]const u8, user_data: ?*const anyopaque) void {
-    _ = user_data;
-    if (data == null) {
-        return;
+    pub fn init(allocator: std.mem.Allocator) !*AbridgedTransportInitializer {
+        const self = try allocator.create(AbridgedTransportInitializer);
+        self.allocator = allocator;
+        return self;
     }
-}
 
-pub fn TrransportRecvData(data: []const u8, user_data: ?*const anyopaque) void {
-    _ = user_data;
-    _ = data;
-}
+    pub fn initializer(self: *AbridgedTransportInitializer) transport.TransportInitializer {
+        return .{
+            .vtable = .{
+                .ctx = self,
+                .init = @ptrCast(&initInternal),
+            },
+        };
+    }
 
-test "test read" {
-    const allocator = std.testing.allocator;
+    fn initInternal(self_ptr: *anyopaque) transport.Error!transport.TransportReturn {
+        const self: *AbridgedTransportInitializer = @ptrCast(@alignCast(self_ptr));
+        const ab = try self.allocator.create(Abridged);
+        ab.* = Abridged{ .allocator = self.allocator };
+        return transport.TransportReturn{
+            .reader = ab.transportReader(),
+            .control = ab.transportControl(),
+            .writer = ab.transportWriter(),
+        };
+    }
 
-    var tcp_abriged = Abridged{
-        .allocator = allocator,
-    };
-    defer tcp_abriged.deinit();
-
-    const transport = tcp_abriged.transportProvider();
-    transport.setRecvDataCallback(TrransportRecvData);
-
-    const net_provider = tcp_abriged.networkProvider();
-    net_provider.setSendCallback(toSendData);
-    net_provider.sendEvent(.Connected);
-
-    try net_provider.recv(&[_]u8{ 2, 1 });
-
-    try net_provider.recv(&[_]u8{ 2, 3, 4, 5, 6, 7, 8, 2, 1, 2 });
-
-    try net_provider.recv(&[_]u8{ 3, 4, 5, 6, 7, 8 });
-
-    try net_provider.recv(&[_]u8{ 0x7F, 0x02, 0x00, 0x00, 1, 2, 3, 4, 5, 6, 7, 8 });
-
-    //tcp_abriged.
-}
+    /// Free the initializer object. Does not tear down created transports.
+    pub fn deinit(self: *AbridgedTransportInitializer) void {
+        self.allocator.destroy(self);
+    }
+};

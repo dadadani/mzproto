@@ -17,302 +17,105 @@ const std = @import("std");
 
 const tl = @import("lib/tl/api.zig");
 
-const Abridged = @import("lib/network/abridged.zig").Abridged;
-const NetworkDataProvider = @import("lib/network/network_data_provider.zig");
-const TransportProvider = @import("lib/network/transport_provider.zig");
+const Abridged = @import("lib/network/abridged.zig");
+const LibxevTransport = @import("lib/network/libxev_tcp.zig");
+const transport = @import("lib/network/transport.zig");
 
-const ConnectionInfo = @import("lib/network/transport_provider.zig").ConnectionInfo;
+const ConnectionInfo = @import("lib/network/transport.zig").ConnectionInfo;
 const AuthKey = @import("lib/proto/auth_key.zig");
 
-var ge = std.heap.GeneralPurposeAllocator(.{}){};
-var loop: xev.Loop = undefined;
-var tcp: xev.TCP = undefined;
+const TransportUP = struct {
+    authgen: AuthKey.AuthGen,
+    transportWriter: transport.TransportWriter,
 
-var authGen: AuthKey.AuthGen = undefined;
-const allocoso = ge.allocator();
-var connection = struct { queue: xev.WriteQueue = undefined, completion: xev.Completion = undefined, transport: Abridged = Abridged{
-    .allocator = ge.allocator(),
-}, readBuf: []u8 = &[0]u8{} }{};
+    fn GeneratedKey(ptr: *const anyopaque, res: AuthKey.GenError!AuthKey.GeneratedAuthKey) void {
+        _ = ptr;
+        _ = res catch |err| {
+            std.log.err("Failed to generate key: {}", .{err});
+            return;
+        };
+        std.log.info("Generated key", .{});
+    }
 
-fn onTcpData(
-    ud: ?*@TypeOf(connection),
-    l: *xev.Loop,
-    c: *xev.Completion,
-    s: xev.TCP,
-    b: xev.ReadBuffer,
-    r: xev.ReadError!usize,
-) xev.CallbackAction {
-    _ = l;
-    _ = c;
-    _ = ud;
+    pub fn write(self_local: *anyopaque, data: []const u8) void {
+        const self: *TransportUP = @ptrCast(@alignCast(self_local));
+        self.transportWriter.send(data) catch {
+            @panic("error in write");
+        };
+    }
 
-    const size = r catch |err| {
-        connection.transport.networkProvider().sendEvent(.Disconnected);
-        std.log.err("Failed to read: {}", .{err});
-        return .disarm;
-    };
-    //std.log.info("incoming Data: {d}", .{b.slice[0..size]});
-    connection.transport.networkProvider().recv(b.slice[0..size]) catch |err| {
-        std.log.err("Failed to process data: {}", .{err});
-        return .disarm;
-    };
+    pub fn transportReader(self_local: *TransportUP) transport.TransportReader {
+        const reader = struct {
+            fn control(self_ptr: *anyopaque, ctrl: transport.Control) void {
+                const self: *TransportUP = @ptrCast(@alignCast(self_ptr));
+                std.debug.print("ctrl: {any}\n", .{ctrl});
+                if (ctrl == .Connect) {
+                    std.debug.print("starting auth gen\n", .{});
+                    self.authgen.start();
+                }
+            }
 
-    read(s) catch |err| {
-        std.log.err("Failed to read: {}", .{err});
-        return .disarm;
-    };
+            const address = std.net.Ip4Address.parse("149.154.167.40", 443) catch {};
 
-    return .disarm;
-}
+            fn connectionInfo(self_ptr: *anyopaque) transport.ConnectionInfo {
+                const self: *TransportUP = @ptrCast(@alignCast(self_ptr));
+                _ = self;
+                return .{
+                    .address = std.net.Address{ .in = address },
+                    .dcId = 2,
+                    .media = false,
+                    .testMode = false,
+                };
+            }
 
-const WriteSession = struct {
-    completion: xev.Completion = undefined,
-    data: []u8 = undefined,
-    writeRequest: xev.WriteRequest = undefined,
+            fn send(ptr: *anyopaque, src: []const u8) void {
+                const self: *TransportUP = @ptrCast(@alignCast(ptr));
+                self.authgen.onData(src);
+            }
+
+            fn sendSuggested(_: *anyopaque) usize {
+                return 0;
+            }
+        };
+
+        return .{ .vtable = .{
+            .ctx = self_local,
+            .control = reader.control,
+            .connectionInfo = reader.connectionInfo,
+            .send = reader.send,
+            .sendSuggested = reader.sendSuggested,
+        } };
+    }
 };
-
-fn onDataWritten(
-    ud: ?*WriteSession,
-    l: *xev.Loop,
-    c: *xev.Completion,
-    s: xev.TCP,
-    b: xev.WriteBuffer,
-    r: xev.WriteError!usize,
-) xev.CallbackAction {
-    _ = l;
-    _ = c;
-    _ = s;
-
-    defer {
-        ge.allocator().free(ud.?.*.data);
-        ge.allocator().destroy(ud.?);
-    }
-
-    const size = r catch |err| {
-        std.log.err("Failed to write: {}", .{err});
-        return .disarm;
-    };
-
-    _ = size;
-    _ = b;
-
-    //std.log.info("Data written: {x}", .{std.fmt.fmtSliceHexLower(b.slice[0..size])});
-
-    return .disarm;
-}
-
-fn ontTcpDataToSend(data: ?[]const u8, user_data: ?*const anyopaque) void {
-    _ = user_data;
-
-    if (data) |d| {
-        //std.log.info("Data to send: {d}", .{d});
-
-        const write = ge.allocator().create(WriteSession) catch |err| {
-            std.log.err("Failed to create write session: {}", .{err});
-            return;
-        };
-
-        write.data = ge.allocator().dupe(u8, d) catch |err| {
-            std.log.err("Failed to allocate buffer: {}", .{err});
-            return;
-        };
-
-        tcp.queueWrite(&loop, &connection.queue, &write.writeRequest, .{ .slice = write.data }, WriteSession, write, onDataWritten);
-        //tcp.write(&loop, &write.completion, .{ .slice = write.data }, WriteSession, write, onDataWritten);
-    } else {
-        std.log.err("Data is null, we should close the connection here", .{});
-        //tcp.cl
-    }
-}
-
-fn read(conn: xev.TCP) !void {
-    if (connection.readBuf.len == 0) {
-        connection.readBuf = try ge.allocator().alloc(u8, connection.transport.networkProvider().suggestedRecvSize());
-    } else {
-        connection.readBuf = try ge.allocator().realloc(connection.readBuf, connection.transport.networkProvider().suggestedRecvSize());
-    }
-
-    conn.read(&loop, &connection.completion, xev.ReadBuffer{ .slice = connection.readBuf }, @TypeOf(connection), &connection, onTcpData);
-}
-
-var timer: std.time.Timer = undefined;
-
-fn GeneratedKey(ptr: *const anyopaque, res: AuthKey.GenError!AuthKey.GeneratedAuthKey) void {
-    _ = ptr;
-    _ = res catch |err| {
-        std.log.err("Failed to generate key: {}", .{err});
-        return;
-    };
-    std.log.info("Generated key: took {d} ms\n", .{timer.read() / std.time.ns_per_ms});
-}
-
-fn connectedCb(ud: ?*void, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.ConnectError!void) xev.CallbackAction {
-    _ = ud;
-    _ = l;
-    _ = c;
-    r catch |err| {
-        std.log.err("Failed to connect: {}", .{err});
-        return .disarm;
-    };
-    connection.transport.networkProvider().setSendCallback(ontTcpDataToSend);
-    connection.transport.networkProvider().sendEvent(.Connected);
-    std.log.info("Connected!", .{});
-
-    read(s) catch |err| {
-        std.log.err("Failed to read: {}", .{err});
-        return .disarm;
-    };
-
-    authGen = AuthKey.AuthGen{ .allocator = allocoso, .connection = connection.transport.transportProvider(), .callback = GeneratedKey, .user_data = &connection, .dcId = 2, .testMode = true, .media = false };
-    timer = std.time.Timer.start() catch {
-        @panic("Failed to start timer");
-    };
-    authGen.start();
-
-    return .disarm;
-}
 
 pub fn main() !void {
-    std.debug.print("sizeof: {}", .{@sizeOf(tl.TL)});
-    defer {
-        switch (ge.deinit()) {
-            std.heap.Check.leak => std.log.err("Memory leak detected", .{}),
-            std.heap.Check.ok => {},
-        }
-    }
+    var loop = try xev.Loop.init(.{});
+    var allocator = std.heap.smp_allocator;
 
-    loop = try xev.Loop.init(.{});
-    defer loop.deinit();
+    const abridged = try Abridged.AbridgedTransportInitializer.init(allocator);
+    const transportupper = try abridged.initializer().init();
 
-    const address = try std.net.Ip4Address.parse("149.154.167.40", 443);
-    tcp = try xev.TCP.init(.{ .in = address });
+    const libxev = try LibxevTransport.LibxevTransportInitializer.init(allocator, &loop);
+    const transportlower = try libxev.initializer().init();
 
-    tcp.connect(&loop, &connection.completion, std.net.Address{ .in = address }, void, null, connectedCb);
+    var up = try allocator.create(TransportUP);
+    up.* = TransportUP{ .authgen = AuthKey.AuthGen{
+        .allocator = allocator,
+        .callback = TransportUP.GeneratedKey,
+        .user_data = up,
+        .dcId = 2,
+        .testMode = true,
+        .media = false,
+        .writeDataCtx = up,
+        .writeData = TransportUP.write,
+    }, .transportWriter = transportupper.writer };
 
+    //transportupper[2].setReader(up.transportReader());
+    //transportlower[2].setReader(transportupper[0]);
+    //transportupper[2].setWriter(transportlower[1]);
+
+    transportupper.control.setReader(up.transportReader());
+    transportlower.control.setReader(transportupper.reader);
+    transportupper.control.setWriter(transportlower.writer);
     try loop.run(.until_done);
 }
-
-const XevNetworkDataProvider = struct {
-    tcp: ?xev.TCP,
-    loop: *xev.Loop,
-    networkDataProvider: ?NetworkDataProvider.NetworkDataProvider,
-    completion: xev.Completion,
-
-    fn xevConnected(
-        self: ?*@This(),
-        l: *xev.Loop,
-        c: *xev.Completion,
-        s: xev.TCP,
-        r: xev.ConnectError!void,
-    ) xev.CallbackAction {
-        _ = l;
-        _ = c;
-        _ = s;
-
-        r catch {
-            self.networkDataProvider.sendEvent(.ConnectError);
-            return .disarm;
-        };
-
-        self.networkDataProvider.sendEvent(.Connected);
-
-        return .disarm;
-    }
-
-    fn xevClosed(
-        self: ?*@This(),
-        l: *xev.Loop,
-        c: *xev.Completion,
-        s: xev.TCP,
-        r: xev.CloseError!void,
-    ) xev.CallbackAction {
-        _ = l;
-        _ = c;
-        _ = s;
-
-        r catch {
-            unreachable;
-        };
-
-        self.networkDataProvider.sendEvent(.Disconnected);
-
-        return .disarm;
-    }
-
-    fn sendData(data: ?[]const u8, ptr: ?*const anyopaque) void {
-        _ = ptr;
-        _ = data;
-    }
-
-    fn connectedCb(ud: ?*XevNetworkDataProvider, l: *xev.Loop, c: *xev.Completion, s: xev.TCP, r: xev.ConnectError!void) xev.CallbackAction {
-        if (ud == null) {
-            return .disarm;
-        }
-        _ = l;
-        _ = c;
-        _ = s;
-
-        r catch {
-            ud.networkDataProvider.sendEvent(.ConnectError);
-            return .disarm;
-        };
-
-        return .disarm;
-    }
-
-    fn recvEvent(event: TransportProvider.TransportEvent, ptr: ?*const anyopaque) void {
-        if (ptr == null) {
-            return;
-        }
-        const self: *XevNetworkDataProvider = @ptrCast(@alignCast(ptr.?));
-        switch (event) {
-            .Connect => {
-                if (tcp != null) {
-                    return;
-                }
-                const info = self.networkDataProvider.getConnectionDetails();
-                self.tcp = try xev.TCP.init(info.address) catch {
-                    self.networkDataProvider.sendEvent(.ConnectError);
-                    return;
-                };
-
-                self.tcp.?.connect(
-                    self.loop,
-                    &self.completion,
-                    info.address,
-                    XevNetworkDataProvider,
-                    self,
-                );
-            },
-
-            .Disconnect => {
-                if (tcp == null) {
-                    return;
-                }
-
-                self.tcp.?.close(self.loop, self.completion, XevNetworkDataProvider, self, xevClosed);
-            },
-        }
-    }
-
-    pub fn init(allocator: std.mem.Allocator, lp: *xev.Loop, ndp: NetworkDataProvider.NetworkDataProvider) !*XevNetworkDataProvider {
-        const result = try allocator.create(XevNetworkDataProvider);
-        errdefer allocator.destroy(result);
-
-        result.* = .{
-            .tcp = null,
-            .loop = lp,
-            .networkDataProvider = ndp,
-        };
-
-        result.networkDataProvider.setUserData(result);
-        result.networkDataProvider.setRecvEventCallback(recvEvent);
-        result.networkDataProvider.setSendCallback(sendData);
-
-        return result;
-    }
-
-    pub fn deinit(self: *XevNetworkDataProvider, allocator: std.mem.Allocator) void {
-        allocator.destroy(self);
-    }
-};
