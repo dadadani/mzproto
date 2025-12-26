@@ -22,7 +22,7 @@ pub const TLParameterType = union(enum) {
     Flags: struct {},
 
     Normal: struct {
-        type: *const types.TLType,
+        type: *types.TLType,
         flag: ?flags.TLFlag,
     },
 

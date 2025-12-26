@@ -145,26 +145,28 @@ pub fn build(b: *std.Build) void {
     // //////////////////////////////////
     // //////////////////////////////////
 
-    const maybe_xev = b.lazyDependency("libxev", .{ .target = target, .optimize = .ReleaseSafe });
-    if (maybe_xev) |xev| {
-        const dev_step = b.step("dev", "dev wip");
+    const dev_step = b.step("dev", "dev wip");
 
-        const dev_exe = b.addExecutable(.{
-            .name = "dev",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/dev_remove_later.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "mzproto", .module = mod },
-                    .{ .name = "xev", .module = xev.module("xev") },
-                },
-            }),
-        });
+    const dev_exe = b.addExecutable(.{
+        .name = "dev",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/dev_remove_later.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mzproto", .module = mod },
+            },
+        }),
+    });
 
-        const install_dev = b.addInstallArtifact(dev_exe, .{});
-        dev_step.dependOn(&install_dev.step);
-    }
+    dev_exe.root_module.addIncludePath(b.path("./src/lib/crypto/"));
+    dev_exe.root_module.addCSourceFile(.{
+        .file = b.path("./src/lib/crypto/pq.c"),
+    });
+
+    const install_dev = b.addInstallArtifact(dev_exe, .{});
+    dev_step.dependOn(&install_dev.step);
+
     // //////////////////////////////////
     // //////////////////////////////////
     // //////////////////////////////////

@@ -38,9 +38,9 @@ pub fn ige(src: []const u8, dest: []u8, key: *const [32]u8, iv: *const [32]u8, c
     while (i < src.len) : (i += 16) {
         const chunk = src[i .. i + 16];
 
-        for (0..16) |j| {
-            iv1[j] ^= chunk[j];
-        }
+        const vec_iv1: @Vector(16, u8) = iv1;
+        const vec_chunk: @Vector(16, u8) = chunk[0..16].*;
+        iv1 = vec_iv1 ^ vec_chunk;
 
         if (doEncrypt) {
             cipher.encrypt(&iv1, &iv1);
@@ -48,9 +48,9 @@ pub fn ige(src: []const u8, dest: []u8, key: *const [32]u8, iv: *const [32]u8, c
             cipher.decrypt(&iv1, &iv1);
         }
 
-        for (0..16) |j| {
-            iv1[j] = iv1[j] ^ iv2[j];
-        }
+        const vec_iv1_result: @Vector(16, u8) = iv1;
+        const vec_iv2: @Vector(16, u8) = iv2;
+        iv1 = vec_iv1_result ^ vec_iv2;
 
         @memcpy(&iv2, chunk);
         @memcpy(dest[i .. i + 16], &iv1);

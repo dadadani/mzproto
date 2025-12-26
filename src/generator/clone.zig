@@ -16,7 +16,7 @@ const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
 const utils = @import("./utils.zig");
 
-pub fn generateConstructorCloneSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorCloneSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     try writer.print(
         \\    pub fn cloneSize(self: *const {s}, size: *usize) void {{
         \\    
@@ -155,7 +155,7 @@ pub fn generateConstructorCloneSize(allocator: std.mem.Allocator, constructor: c
     , .{});
 }
 
-pub fn generateConstructorClone(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorClone(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     try writer.print(
         \\    pub fn clone(self: *const {s}, out: []align(@alignOf({s})) u8) struct {{*{s}, usize}} {{
         \\

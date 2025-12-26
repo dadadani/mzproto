@@ -16,7 +16,7 @@ const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
 const utils = @import("./utils.zig");
 
-pub fn generateConstructorDeserializeSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorDeserializeSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     try writer.print(
         \\    pub fn deserializeSize(in: []const u8, size: *usize) usize {{
         \\    
@@ -193,7 +193,7 @@ pub fn generateConstructorDeserializeSize(allocator: std.mem.Allocator, construc
     , .{});
 }
 
-pub fn generateConstructorDeserialize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorDeserialize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     try writer.print(
         \\    pub fn deserialize(noalias in: []const u8, noalias out: []align(@alignOf({s})) u8) struct {{*{s}, usize, usize}} {{
         \\

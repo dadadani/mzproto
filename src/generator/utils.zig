@@ -20,16 +20,17 @@ const TLType = @import("../parser/types.zig").TLType;
 /// Finds the layer version from a TL schema file.
 ///
 /// The file should contain a comment like `//LAYER #`.
-pub fn findLayer(filename: []const u8) !?i32 {
+pub fn findLayer(io: std.Io, filename: []const u8) !?i32 {
     const LAYER_DEF = "LAYER";
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
 
-    var in: [20]u8 = undefined;
+    var buffer: [2048]u8 = undefined;
 
-    // readUntilDelimiterOrEof returns StreamTooLong if the slice you have passed is too small, we just ignore it
-    // TODO: replace deprecatedReader with zig's new reader/writer API
-    while (file.deprecatedReader().readUntilDelimiterOrEof(&in, '\n') catch "") |layer| {
+    var reader = file.reader(io, &buffer);
+
+    // TODO: check this thing. idk if it's the ideal thing do to, I don't understand the new i/o api right now
+    while (try reader.interface.takeDelimiter('\n')) |layer| {
         if (std.mem.startsWith(u8, layer, "//")) {
             if (std.mem.indexOf(u8, layer, LAYER_DEF)) |pos| {
                 return try std.fmt.parseInt(i32, std.mem.trim(u8, layer[pos + LAYER_DEF.len ..], " "), 10);
@@ -40,15 +41,15 @@ pub fn findLayer(filename: []const u8) !?i32 {
 }
 
 pub fn normalizeName(allocator: std.mem.Allocator, def: anytype, mtproto: bool) ![]u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
+    var list = std.ArrayList(u8){};
+    defer list.deinit(allocator);
 
     if (mtproto) {
-        _ = try list.appendSlice("Proto");
+        _ = try list.appendSlice(allocator, "Proto");
     }
     for (def.namespaces.items) |namespace| {
-        _ = try list.append(std.ascii.toUpper(namespace[0]));
-        _ = try list.appendSlice(namespace[1..]);
+        _ = try list.append(allocator, std.ascii.toUpper(namespace[0]));
+        _ = try list.appendSlice(allocator, namespace[1..]);
     }
 
     var i: usize = 0;
@@ -59,15 +60,15 @@ pub fn normalizeName(allocator: std.mem.Allocator, def: anytype, mtproto: bool) 
             continue;
         }
         if (i == 0 or make_upper) {
-            _ = try list.append(std.ascii.toUpper(c));
+            _ = try list.append(allocator, std.ascii.toUpper(c));
             make_upper = false;
         } else {
-            _ = try list.append(c);
+            _ = try list.append(allocator, c);
         }
         i += 1;
     }
 
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(allocator);
 }
 
 pub fn safeStrParam(in: []const u8) []const u8 {
