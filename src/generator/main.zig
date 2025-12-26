@@ -27,53 +27,42 @@ const GeneratorError = error{UnableToFindLayerVersion};
 const unions = @import("unions.zig");
 
 fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !std.ArrayList(constructors.TLConstructor) {
-    var definitions = std.ArrayList(constructors.TLConstructor).init(allocator);
+    var definitions = std.ArrayList(constructors.TLConstructor){};
     errdefer {
-        for (definitions.items) |definition| {
+        for (definitions.items) |*definition| {
             definition.deinit();
         }
-        definitions.deinit();
+        definitions.deinit(allocator);
     }
 
     const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
     defer file.close();
 
     const stat = try file.stat();
-    const data = try file.readToEndAlloc(allocator, stat.size);
+
+    const data = try allocator.alloc(u8, stat.size);
+
+    std.debug.assert(try file.read(data) == stat.size);
     defer allocator.free(data);
 
     var iterator = try parser.TlIterator.init(allocator, data);
     defer iterator.deinit();
     while (try iterator.next()) |constructor| {
-        try definitions.append(constructor);
+        try definitions.append(allocator, constructor);
     }
     return definitions;
 }
 
-pub fn boilerplate(writer: *std.io.Writer) !void {
-    if (try findLayer("schema/api.tl")) |layer| {
+pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
+    if (try findLayer(io, "schema/api.tl")) |layer| {
         _ = try writer.print(
             \\//! Provides low-level, zero-allocation bindings for the Telegram (TL) API schema.
             \\//! This module contains all the data types and functions needed to serialize and
             \\//! deserialize objects for communication with the Telegram servers.
             \\//!
-            \\//! **WARNING**: This is an auto-generated file based on Telegram's API Layer `LAYER_VERSION`.
+            \\//! Warning: This is an auto-generated file.
             \\//! Do not edit it directly, as your changes will be overwritten by the generator.
             \\//!
-            \\//! - **No Hidden Allocations:** Functions like `serialize`, `deserialize`, and `clone`
-            \\//!   do not allocate memory. Instead, they write their results into a buffer that
-            \\//!   you provide.
-            \\//!
-            \\//! - **Buffer Sizing:** Before calling an operation, you may determine the required buffer size using 
-            \\//!   the corresponding `*Size` function for this:
-            \\//!   - `serializeSize()`
-            \\//!   - `deserializeSize()`
-            \\//!   - `cloneSize()`
-            \\//!
-            \\//!   These functions guarantee to return a size sufficient for the subsequent operation.
-            \\//!
-            \\//! For a comprehensive example of how to use this API, please see the
-            \\//! `api_tests.zig` file.
             \\
             \\const base = @import("base.zig");
             \\const std = @import("std");
@@ -111,23 +100,23 @@ fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMap(s
             }
 
             if (!map.contains(name)) {
-                try map.put(name, std.ArrayList(constructors.TLConstructor).init(allocator));
+                try map.put(name, std.ArrayList(constructors.TLConstructor){});
                 keep = true;
             }
 
             const list = map.getPtr(name).?;
-            try list.append(constructor);
+            try list.append(allocator, constructor);
         }
     }
 }
 
-fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writer: *std.io.Writer, tl_union_list: *std.ArrayList(TlUnionItem), mtproto: bool) !void {
+fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writer: *std.Io.Writer, tl_union_list: *std.ArrayList(TlUnionItem), mtproto: bool) !void {
     var defs = try parseFile(allocator, filename);
     defer {
-        for (defs.items) |item| {
+        for (defs.items) |*item| {
             item.deinit();
         }
-        defs.deinit();
+        defs.deinit(allocator);
     }
 
     var boxed_map = std.StringArrayHashMap(std.ArrayList(constructors.TLConstructor)).init(allocator);
@@ -135,7 +124,7 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writ
         var iterator = boxed_map.iterator();
         while (iterator.next()) |entry| {
             allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(allocator);
         }
         boxed_map.deinit();
     }
@@ -149,7 +138,7 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writ
             const name = try normalizeName(allocator, def, mtproto);
             errdefer allocator.free(name);
 
-            try tl_union_list.append(.{ .name = name, .id = def.id });
+            try tl_union_list.append(allocator, .{ .name = name, .id = def.id });
         }
 
         try generateDef(allocator, def, writer, mtproto);
@@ -164,17 +153,20 @@ pub fn main() !void {
 
     var writer = file.writer(&.{});
 
-    try boilerplate(&writer.interface);
-
     var allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = allocator.deinit();
 
-    var tl_union_list = std.ArrayList(TlUnionItem).init(allocator.allocator());
+    var io = std.Io.Threaded.init(allocator.allocator());
+    defer io.deinit();
+
+    try boilerplate(io.io(), &writer.interface);
+
+    var tl_union_list = std.ArrayList(TlUnionItem){};
     defer {
         for (tl_union_list.items) |item| {
             allocator.allocator().free(item.name);
         }
-        tl_union_list.deinit();
+        tl_union_list.deinit(allocator.allocator());
     }
 
     try parseAndGenerateFile(allocator.allocator(), "./schema/api.tl", &writer.interface, &tl_union_list, false);

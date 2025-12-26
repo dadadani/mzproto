@@ -16,10 +16,13 @@ zig-out/
 /build/
 /build-*/
 /docgen_tmp/
-
 # Although this was renamed to .zig-cache, let's leave it here for a few
 # releases to make it less annoying to work with multiple branches.
 zig-cache/
 
 src/generator/api.zig
 src/lib/tl/api.zig
+
+
+# no andrew, I don't care about the global gitignore
+.DS_Store

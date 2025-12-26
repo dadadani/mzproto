@@ -388,6 +388,7 @@ pub fn Vector(comptime ty: type) type {
             if (len > 0) {
                 const el = in[read..].len / len;
 
+                // TODO: Although this works, we should change the TL parser to actually provide a "result decoder", we have the type expected in the schema already
                 if (el == 4) {
                     for (0..len) |i| {
                         vector[i] = ty{ .Int = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little) };
@@ -566,7 +567,6 @@ pub fn deserializeString(src: []const u8, dest: []u8) struct { usize, usize } {
     return .{ len, read };
 }
 
-/// Calculates how many bytes are needed to align a pointer
 pub fn ensureAligned(in: usize, align_n: usize) usize {
     var result: usize = 0;
 
@@ -619,7 +619,6 @@ test "deserialize string" {}
 
 test "deserialize long string" {
     const allocator = std.testing.allocator;
-    defer _ = std.testing.allocator_instance.detectLeaks();
 
     const expected = "qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm1234567890qwertyuiopasdfghjklzxcvbnm12345678a90";
 

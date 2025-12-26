@@ -23,9 +23,9 @@ pub const TLType = struct {
     name: []const u8,
     bare: bool,
     generic_ref: bool,
-    generic_arg: ?*const @This(),
+    generic_arg: ?*@This(),
 
-    pub fn parse(allocator: std.mem.Allocator, in: []const u8) !*const TLType {
+    pub fn parse(allocator: std.mem.Allocator, in: []const u8) !*TLType {
         const genericRef = trim: {
             if (std.mem.startsWith(u8, in, "!")) {
                 break :trim .{ std.mem.trimLeft(u8, in, "!"), true };
@@ -55,17 +55,17 @@ pub const TLType = struct {
             }
         }
 
-        var namespaces = std.ArrayList([]const u8).init(allocator);
+        var namespaces = std.ArrayList([]const u8){};
         errdefer {
             for (namespaces.items) |item| {
                 allocator.free(item);
             }
-            namespaces.deinit();
+            namespaces.deinit(allocator);
         }
         var split_ns = std.mem.splitSequence(u8, genericArg[0], ".");
 
         while (split_ns.next()) |ns| {
-            try namespaces.append(try allocator.dupe(u8, ns));
+            try namespaces.append(allocator, try allocator.dupe(u8, ns));
         }
 
         const name = namespaces.pop().?;
@@ -91,13 +91,13 @@ pub const TLType = struct {
         return res;
     }
 
-    pub fn deinit(self: *const TLType) void {
+    pub fn deinit(self: *TLType) void {
         defer self.allocator.destroy(self);
 
         for (self.namespaces.items) |item| {
             self.allocator.free(item);
         }
-        self.namespaces.deinit();
+        self.namespaces.deinit(self.allocator);
 
         self.allocator.free(self.name);
 

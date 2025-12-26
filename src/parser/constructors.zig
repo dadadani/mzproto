@@ -27,7 +27,7 @@ pub const TLConstructor = struct {
     name: []const u8,
     id: u32,
     params: std.ArrayList(parameters.TLParameter),
-    type: *const types.TLType,
+    type: *types.TLType,
     category: sections.TLSection,
     allocator: std.mem.Allocator,
 
@@ -63,17 +63,17 @@ pub const TLConstructor = struct {
             break :id .{ name, split.next() };
         };
 
-        var namespace = std.ArrayList([]const u8).init(allocator);
+        var namespace = std.ArrayList([]const u8){};
         errdefer {
             for (namespace.items) |item| {
                 allocator.free(item);
             }
-            namespace.deinit();
+            namespace.deinit(allocator);
         }
 
         var ns_split = std.mem.splitSequence(u8, name, ".");
         while (ns_split.next()) |ns| {
-            try namespace.append(try allocator.dupe(u8, ns));
+            try namespace.append(allocator, try allocator.dupe(u8, ns));
         }
 
         const id = id: {
@@ -83,28 +83,28 @@ pub const TLConstructor = struct {
             break :id try @import("./utils.zig").generateIdFromConstructor(allocator, name);
         };
 
-        var params = std.ArrayList(parameters.TLParameter).init(allocator);
+        var params = std.ArrayList(parameters.TLParameter){};
         errdefer {
             for (params.items) |param| {
                 param.deinit();
             }
-            params.deinit();
+            params.deinit(allocator);
         }
 
-        var type_defs = std.ArrayList([]u8).init(allocator);
+        var type_defs = std.ArrayList([]u8){};
         defer {
             for (type_defs.items) |item| {
                 allocator.free(item);
             }
-            type_defs.deinit();
+            type_defs.deinit(allocator);
         }
 
-        var flag_defs = std.ArrayList([]const u8).init(allocator);
+        var flag_defs = std.ArrayList([]const u8){};
         defer {
             for (flag_defs.items) |item| {
                 allocator.free(item);
             }
-            flag_defs.deinit();
+            flag_defs.deinit(allocator);
         }
         if (middle) |smiddle| {
             var split = std.mem.splitSequence(u8, smiddle, " ");
@@ -116,7 +116,7 @@ pub const TLConstructor = struct {
                 errdefer parameter.deinit();
 
                 if (parameter.type_def) {
-                    try type_defs.append(try allocator.dupe(u8, parameter.name));
+                    try type_defs.append(allocator, try allocator.dupe(u8, parameter.name));
                     parameter.deinit();
                     continue;
                 }
@@ -124,7 +124,7 @@ pub const TLConstructor = struct {
                 if (parameter.type) |t| {
                     switch (t) {
                         .Flags => {
-                            try flag_defs.append(try allocator.dupe(u8, parameter.name));
+                            try flag_defs.append(allocator, try allocator.dupe(u8, parameter.name));
                         },
                         .Normal => {
                             if (t.Normal.type.generic_ref) {
@@ -171,7 +171,7 @@ pub const TLConstructor = struct {
                     }
                 }
 
-                try params.append(parameter);
+                try params.append(allocator, parameter);
             }
         }
 
@@ -187,16 +187,16 @@ pub const TLConstructor = struct {
         };
     }
 
-    pub fn deinit(self: *const TLConstructor) void {
+    pub fn deinit(self: *TLConstructor) void {
         for (self.namespaces.items) |item| {
             self.allocator.free(item);
         }
-        self.namespaces.deinit();
+        self.namespaces.deinit(self.allocator);
 
         for (self.params.items) |param| {
             param.deinit();
         }
-        self.params.deinit();
+        self.params.deinit(self.allocator);
 
         self.type.deinit();
         self.allocator.free(self.name);

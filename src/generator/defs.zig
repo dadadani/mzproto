@@ -19,7 +19,7 @@ const deserialize = @import("./deserialize.zig");
 const serialize = @import("./serialize.zig");
 const clone = @import("./clone.zig");
 
-pub fn generateDef(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, file: *std.io.Writer, mtproto: bool) !void {
+pub fn generateDef(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, file: *std.Io.Writer, mtproto: bool) !void {
     const name = try utils.normalizeName(allocator, constructor, mtproto);
     defer allocator.free(name);
 

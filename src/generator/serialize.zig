@@ -16,7 +16,7 @@ const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
 const utils = @import("./utils.zig");
 
-pub fn generateConstructorSerializeSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorSerializeSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     _ = mtproto;
     try writer.print(
         \\    pub fn serializeSize(self: *const {s}) usize {{
@@ -149,7 +149,7 @@ pub fn generateConstructorSerializeSize(allocator: std.mem.Allocator, constructo
     , .{});
 }
 
-pub fn generateConstructorSerialize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.io.Writer, mtproto: bool) !void {
+pub fn generateConstructorSerialize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     _ = mtproto;
     try writer.print(
         \\    pub fn serialize(self: *const {s}, out: []u8) usize {{
