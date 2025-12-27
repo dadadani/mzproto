@@ -42,6 +42,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    mod.addIncludePath(b.path("./src/lib/crypto/"));
+    mod.addCSourceFile(.{
+        .file = b.path("./src/lib/crypto/pq.c"),
+    });
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -157,11 +162,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "mzproto", .module = mod },
             },
         }),
-    });
-
-    dev_exe.root_module.addIncludePath(b.path("./src/lib/crypto/"));
-    dev_exe.root_module.addCSourceFile(.{
-        .file = b.path("./src/lib/crypto/pq.c"),
     });
 
     const install_dev = b.addInstallArtifact(dev_exe, .{});
