@@ -17,6 +17,7 @@ const std = @import("std");
 const factorize = @cImport({
     @cInclude("pq.h");
 });
+const utils = @import("./utils.zig");
 
 const Transport = @import("../transport.zig").Transport;
 const ige = @import("../crypto/ige.zig").ige;
@@ -34,21 +35,19 @@ pub const GenError = error{
 
 pub const GeneratedAuthKey = struct {
     authKey: [256]u8,
-    firstSalt: u64,
+    first_salt: u64,
 };
 
 fn getPublicKey(id: u64) ?struct { u2048, u64 } {
+    // The keys are normally specified as PEM-encoded strings, for now I have extracted the modulus and exponent as regular numbers.
+    // TODO: Implement reading the key from PEM
     return switch (id) {
+        // Keys for the new RSA_PAD handshake method
         0xd09d1d85de64fd85 => .{ 0xE8BB3305C0B52C6CF2AFDF7637313489E63E05268E5BADB601AF417786472E5F93B85438968E20E6729A301C0AFC121BF7151F834436F7FDA680847A66BF64ACCEC78EE21C0B316F0EDAFE2F41908DA7BD1F4A5107638EEB67040ACE472A14F90D9F7C2B7DEF99688BA3073ADB5750BB02964902A359FE745D8170E36876D4FD8A5D41B2A76CBFF9A13267EB9580B2D06D10357448D20D9DA2191CB5D8C93982961CDFDEDA629E37F1FB09A0722027696032FE61ED663DB7A37F6F263D370F69DB53A0DC0A1748BDAAFF6209D5645485E6E001D1953255757E4B8E42813347B11DA6AB500FD0ACE7E6DFA3736199CCAF9397ED0745A427DCFA6CD67BCB1ACFF3, 0x010001 },
         0xb25898df208d2603 => .{ 0xC8C11D635691FAC091DD9489AEDCED2932AA8A0BCEFEF05FA800892D9B52ED03200865C9E97211CB2EE6C7AE96D3FB0E15AEFFD66019B44A08A240CFDD2868A85E1F54D6FA5DEAA041F6941DDF302690D61DC476385C2FA655142353CB4E4B59F6E5B6584DB76FE8B1370263246C010C93D011014113EBDF987D093F9D37C2BE48352D69A1683F8F6E6C2167983C761E3AB169FDE5DAAA12123FA1BEAB621E4DA5935E9C198F82F35EAE583A99386D8110EA6BD1ABB0F568759F62694419EA5F69847C43462ABEF858B4CB5EDC84E7B9226CD7BD7E183AA974A712C079DDE85B9DC063B8A5C08E8F859C0EE5DCD824C7807F20153361A7F63CFD2A433A1BE7F5, 0x010001 },
         else => null,
     };
 }
-
-const Deserialized = struct {
-    ptr: []u8,
-    data: tl.TL,
-};
 
 const AuthGen = struct {
     allocator: std.mem.Allocator,
@@ -74,21 +73,20 @@ const AuthGen = struct {
     transport: *Transport,
     io: std.Io,
 
+    /// Sends data in plain text mode.
+    ///
+    /// The plain text mode sets the auth key to zero
     fn sendData(self: *AuthGen, data: []const u8) !void {
         var headers: [@sizeOf(i64) + @sizeOf(i64) + @sizeOf(i32)]u8 = undefined;
-
-        // const buf = try self.allocator.alloc(u8, @sizeOf(i64) + @sizeOf(i64) + @sizeOf(i32) + data.len);
-        //defer self.allocator.free(buf);
 
         @memset(headers[0..8], 0);
         std.mem.writeInt(i64, headers[8..16], (try std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
         std.mem.writeInt(i32, headers[16..20], @intCast(data.len), .little);
 
         try self.transport.writeVec(&.{ &headers, data });
-        //self.writeData(self.writeDataCtx, buf);
     }
 
-    fn reqPQ(self: *AuthGen) !Deserialized {
+    fn reqPQ(self: *AuthGen) !utils.Deserialized {
         self.nonce = std.crypto.random.int(u128);
         var data: [tl.TL.serializeSize(&tl.TL{ .ProtoReqPqMulti = &.{ .nonce = 0 } })]u8 = undefined;
         const toWrite = tl.TL.serialize(&.{ .ProtoReqPqMulti = &.{ .nonce = self.nonce } }, &data);
@@ -100,13 +98,11 @@ const AuthGen = struct {
 
         if (d.data != .ProtoResPQ) {
             self.status = .Failed;
-            //self.callback(self.user_data, GenError.FailedResPQ);
             return GenError.FailedResPQ;
         }
         const resPQ = d.data.ProtoResPQ;
         if (resPQ.nonce != self.nonce) {
             self.status = .Failed;
-            //self.callback(self.user_data, GenError.Security);
             return GenError.Security;
         }
         self.server_nonce = resPQ.server_nonce;
@@ -114,7 +110,8 @@ const AuthGen = struct {
         return d;
     }
 
-    fn recvData(self: *AuthGen) !Deserialized {
+    /// Receive data in plain text mode
+    fn recvData(self: *AuthGen) !utils.Deserialized {
         const len = try self.transport.recvLen();
 
         const buf = try self.allocator.alloc(u8, len);
@@ -150,17 +147,15 @@ const AuthGen = struct {
 
             if (self.public_key == null) {
                 self.status = .Failed;
-                //self.callback(self.user_data, GenError.UnknownFingerprints);
                 return GenError.UnknownFingerprints;
             }
 
             var p: u64 = 0;
             var q: u64 = 0;
 
-            // calulate factors from pq
+            // get the primes p and q from pq
             if (factorize.pq_factor(std.mem.readInt(u64, resPQ.pq[0..8], .big), &p, &q) != 1) {
                 self.status = .Failed;
-                //self.callback(self.user_data, GenError.Security);
                 return GenError.Security;
             }
 
@@ -202,8 +197,6 @@ const AuthGen = struct {
 
         if (d.data != .ProtoServerDHParamsOk) {
             self.status = .Failed;
-            //self.callback(self.user_data, GenError.FailedReqDH);
-            //return;
             return GenError.FailedReqDH;
         }
 
@@ -211,15 +204,11 @@ const AuthGen = struct {
 
         if (dhParamsOk.nonce != self.nonce) {
             self.status = .Failed;
-            //   self.callback(self.user_data, GenError.Security);
-            // return;
             return GenError.Security;
         }
 
         if (dhParamsOk.server_nonce != self.server_nonce) {
             self.status = .Failed;
-            // self.callback(self.user_data, GenError.Security);
-            //  return;
             return GenError.Security;
         }
 
@@ -281,7 +270,6 @@ const AuthGen = struct {
 
         if (deser[0] != .ProtoServerDHInnerData) {
             self.status = .Failed;
-            //self.callback(self.user_data, GenError.FailedReqDH);
             return GenError.FailedReqDH;
         }
 
@@ -289,14 +277,11 @@ const AuthGen = struct {
 
         if (dhInnerData.nonce != self.nonce) {
             self.status = .Failed;
-            // self.callback(self.user_data, GenError.Security);
-            // return;
             return GenError.Security;
         }
 
         if (dhInnerData.server_nonce != self.server_nonce) {
             self.status = .Failed;
-            //  self.callback(self.user_data, GenError.Security);
             return GenError.Security;
         }
 
@@ -314,7 +299,6 @@ const AuthGen = struct {
 
         rangeCheck(@intCast(dhInnerData.g), 1, (self.dhPrime - 1)) catch |err| {
             self.status = .Failed;
-            //   self.callback(self.user_data, err);
             return err;
         };
         rangeCheck(self.gA, 1, (self.dhPrime - 1)) catch |err| {
@@ -389,7 +373,7 @@ const AuthGen = struct {
             .ProtoDhGenOk => {
                 var result = GeneratedAuthKey{
                     .authKey = undefined,
-                    .firstSalt = 0,
+                    .first_salt = 0,
                 };
                 // TODO: maybe optimize this
                 var newNonce: [32]u8 = undefined;
@@ -397,7 +381,7 @@ const AuthGen = struct {
                 std.mem.writeInt(u256, &newNonce, self.new_nonce, .little);
                 std.mem.writeInt(u128, &serverNonce, self.server_nonce, .little);
 
-                result.firstSalt = std.mem.readInt(u64, result.authKey[0..8], .little) ^ std.mem.readInt(u64, serverNonce[0..8], .little);
+                result.first_salt = std.mem.readInt(u64, newNonce[0..8], .little) ^ std.mem.readInt(u64, serverNonce[0..8], .little);
 
                 var m = try Modulus.fromPrimitive(u2048, self.dhPrime);
 
@@ -427,26 +411,20 @@ const AuthGen = struct {
                 }
 
                 self.status = .Completed;
-                //self.callback(self.user_data, result);
                 return result;
             },
             .ProtoDhGenRetry => {
                 // TODO: retry
                 self.status = .Failed;
                 return GenError.InvalidResponse;
-                //self.callback(self.user_data, GenError.FailedSetClientDH);
             },
             else => {
                 self.status = .Failed;
                 return GenError.InvalidResponse;
-                //self.callback(self.user_data, GenError.FailedSetClientDH);
             },
         }
     }
 };
-
-// writeDataCtx: *anyopaque,
-// writeData: *const fn (self: *anyopaque, data: []const u8) void,
 
 const Modulus = std.crypto.ff.Modulus(2048);
 
@@ -516,35 +494,7 @@ fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
     return result;
 }
 
-pub fn onData(self: *AuthGen, data: []const u8) void {
-    if (data.len == 4) {
-        //const code = std.mem.readInt(i32, data[0..4], .little);
-        self.status = .Failed;
-        self.callback(self.user_data, GenError.InvalidResponse);
-        return;
-    }
-
-    const d = self.deserialize(data) catch |err| {
-        self.status = .Failed;
-        self.callback(self.user_data, err);
-        return;
-    };
-    defer self.allocator.free(d.ptr);
-
-    switch (self.status) {
-        .Idle => {},
-        .ReqPQ => {
-
-            // Find a public key to use
-
-        },
-        .ReqDH => {},
-        .setClientDH => {},
-        .Completed => {},
-        .Failed => {},
-    }
-}
-
+/// Starts the auth key generation on the specified `transport`
 pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport, dcId: u8, media: bool, test_mode: bool) !GeneratedAuthKey {
     var self = AuthGen{
         .allocator = allocator,

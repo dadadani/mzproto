@@ -46,7 +46,7 @@ pub const Transport = union(Transports) {
     }
 
     pub fn write(self: *Transport, buf: []const u8) !void {
-        return switch (self) {
+        return switch (self.*) {
             .Abridged => self.Abridged.write(buf),
         };
     }

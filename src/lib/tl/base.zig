@@ -19,6 +19,44 @@ pub fn ProtoMessage(comptime ty: type) type {
         msg_id: u64,
         seqno: i32,
         body: ty,
+
+        pub fn deserializeSize(in: []const u8, size: *usize) usize {
+            std.debug.print("in: {any}\n", .{in});
+            var read: usize = 0;
+            size.* += @sizeOf(@This());
+
+            read += 8; // msg_id
+            read += 4; // seqno
+
+            const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            read += 4;
+
+            std.debug.print("bytes to read: {d}\n", .{bytes});
+
+            return ty.deserializeSize(in[read .. read + bytes], size);
+        }
+
+        pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
+            var written: usize = @sizeOf(@This());
+            var read: usize = 0;
+            const self = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
+
+            self.msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
+            read += 8;
+
+            self.seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            read += 4;
+
+            const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            read += 4;
+
+            const d = ty.deserialize(in[read .. read + bytes], out[written..]);
+            self.body = d[0];
+            written += d[1];
+            read += d[2];
+
+            return .{ self, written, read };
+        }
     };
 }
 
@@ -66,7 +104,7 @@ pub fn MessageContainer(comptime ty: type) type {
         }
 
         pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const result = @as(*@This(), @alignCast(@ptrCast(out[0..@sizeOf(@This())].ptr)));
+            const result = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
             var written: usize = @sizeOf(@This());
 
             written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf([]const ty));
@@ -108,7 +146,7 @@ pub fn MessageContainer(comptime ty: type) type {
         pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
             var written: usize = @sizeOf(@This());
             var read: usize = 0;
-            const self = @as(*@This(), @alignCast(@ptrCast(out[0..@sizeOf(@This())].ptr)));
+            const self = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
 
             //const alignment = ensureAligned(written.*, @alignOf(*@This()));
             //const result = @as(*@This(), @alignCast(@ptrCast(dest[written.* + alignment ..].ptr)));
@@ -192,7 +230,7 @@ pub const FutureSalts = struct {
 
     pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
         var written: usize = 0;
-        const self_out = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+        const self_out = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
 
         self_out.req_msg_id = self.req_msg_id;
         self_out.now = self.now;
@@ -211,7 +249,7 @@ pub const FutureSalts = struct {
     pub fn deserialize(src: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
         //const alignment = ensureAligned(written.*, @alignOf(*@This()));
 
-        const self = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+        const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
         var written: usize = @sizeOf(@This());
         var read: usize = 0;
 
@@ -270,7 +308,7 @@ pub fn RPCResult(comptime ty: type) type {
         }
 
         pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const result = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+            const result = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
             var written: usize = @sizeOf(@This());
 
             result.req_msg_id = self.req_msg_id;
@@ -282,7 +320,7 @@ pub fn RPCResult(comptime ty: type) type {
         }
 
         pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-            const self = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+            const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
             var written: usize = @sizeOf(@This());
             var read: usize = 0;
 
@@ -327,7 +365,7 @@ pub fn Vector(comptime ty: type) type {
         }
 
         pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const self_out = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+            const self_out = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
             var written: usize = 0;
 
             written += @sizeOf(@This());
@@ -374,7 +412,7 @@ pub fn Vector(comptime ty: type) type {
         }
 
         pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-            const self = @as(*@This(), @alignCast(@ptrCast(out[0..].ptr)));
+            const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
             var written: usize = @sizeOf(@This());
             var read: usize = 0;
 
@@ -388,7 +426,7 @@ pub fn Vector(comptime ty: type) type {
             if (len > 0) {
                 const el = in[read..].len / len;
 
-                // TODO: Although this works, we should change the TL parser to actually provide a "result decoder", we have the type expected in the schema already
+                // TODO: Although this works, we should change the TL parser to actually provide a "result decoder", we have the expected type in the schema already
                 if (el == 4) {
                     for (0..len) |i| {
                         vector[i] = ty{ .Int = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little) };
@@ -533,7 +571,7 @@ pub fn bytesToSlice(in: []u8, size: usize, comptime T: type) struct { []T, usize
     const real_size = size * @sizeOf(T);
     const slice = std.mem.bytesAsSlice(T, in[alignment .. alignment + real_size]);
 
-    return .{ @constCast(@ptrCast(@alignCast(slice))), alignment + real_size };
+    return .{ @ptrCast(@alignCast(@constCast(slice))), alignment + real_size };
 
     //const {s}_vector = @constCast(@as(@TypeOf(result.{s}), @alignCast(std.mem.bytesAsSlice(base.unwrapType(@TypeOf(result.{s})), dest[written.* .. written.* + (len * @sizeOf(base.unwrapType(@TypeOf(result.{s}))))]))));
 }
@@ -625,7 +663,7 @@ test "deserialize long string" {
     const data = [_]u8{ 254, 69, 1, 0, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 97, 115, 100, 102, 103, 104, 106, 107, 108, 122, 120, 99, 118, 98, 110, 109, 49, 50, 51, 52, 53, 54, 55, 56, 97, 57, 48, 0, 0, 0 };
 
     var read: usize = 0;
-    const dest= try allocator.alloc(u8, strDeserializedSize(&data, &read));
+    const dest = try allocator.alloc(u8, strDeserializedSize(&data, &read));
     defer allocator.free(dest);
 
     const desr = deserializeString(&data, dest);

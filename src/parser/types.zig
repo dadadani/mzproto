@@ -28,7 +28,7 @@ pub const TLType = struct {
     pub fn parse(allocator: std.mem.Allocator, in: []const u8) !*TLType {
         const genericRef = trim: {
             if (std.mem.startsWith(u8, in, "!")) {
-                break :trim .{ std.mem.trimLeft(u8, in, "!"), true };
+                break :trim .{ std.mem.trimStart(u8, in, "!"), true };
             }
             break :trim .{ in, false };
         };

@@ -73,6 +73,7 @@ pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
             \\pub const ProtoMessage = base.ProtoMessage(TL);
             \\pub const RPCResult = base.RPCResult(TL);
             \\pub const Vector = base.Vector(TL);
+            \\pub const FutureSalts = base.FutureSalts;
             \\
             \\
         , .{layer});

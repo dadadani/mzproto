@@ -83,12 +83,12 @@ pub fn write(self: *Abridged, buf: []const u8) !void {
     const len = @as(u8, @intCast(buf.len / 4));
 
     if (len < 0x7F) {
-        try self.writer.writeVec(&.{ &.{len}, buf });
+        _ = try self.writer.writeVec(&.{ &.{len}, buf });
         try self.writer.flush();
     } else {
         var buf_dest: [4]u8 = undefined;
-        std.mem.writeInt(u32, buf, @as(u32, len), .little);
-        try self.writer.writeVec(&.{ &.{0x7F}, buf_dest[0..3], buf });
+        std.mem.writeInt(u32, &buf_dest, @as(u32, len), .little);
+        _ = try self.writer.writeVec(&.{ &.{0x7F}, buf_dest[0..3], buf });
         try self.writer.flush();
     }
 }

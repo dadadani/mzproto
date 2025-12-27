@@ -215,6 +215,7 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\    Vector: *const Vector,
         \\    Int: u32,
         \\    Long: u64,
+        \\    FutureSalts: *const FutureSalts,
         \\
     , .{});
 
@@ -321,6 +322,10 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                _ = base.serializeInt(@as(u32, 0x1cb5c415), out[0..4]);
         \\                return 4 + x.serialize(out[4..]);
         \\            }},
+        \\            .FutureSalts => |x| {{
+        \\                _ = base.serializeInt(@as(u32, 0xae500895), out[0..4]);
+        \\                return 4 + x.serialize(out[4..]);
+        \\            }},
         \\
     , .{});
 
@@ -363,6 +368,11 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(Vector)));
         \\                const d = Vector.deserialize(in[4..], @alignCast(out[alignment..]));
         \\                return .{{TL{{.Vector = d[0]}}, alignment+d[1], 4+d[2]}};
+        \\            }},
+        \\            0xae500895 => {{
+        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(MessageContainer)));
+        \\                const d = FutureSalts.deserialize(in[4..], @alignCast(out[alignment..]));
+        \\                return .{{TL{{.FutureSalts = d[0]}}, alignment+d[1], 4+d[2]}};
         \\            }},
         \\
     , .{});
@@ -428,6 +438,11 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
         \\                const cloned = x.clone(@alignCast(out[alignment..]));
         \\                return .{{TL{{.MessageContainer = cloned[0]}}, alignment+cloned[1]}};
+        \\            }},
+        \\            .FutureSalts => |x| {{
+        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
+        \\                const cloned = x.clone(@alignCast(out[alignment..]));
+        \\                return .{{TL{{.FutureSalts = cloned[0]}}, alignment+cloned[1]}};
         \\            }},
         \\            .RPCResult => |x| {{
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
