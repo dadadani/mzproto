@@ -207,7 +207,7 @@ test "parse constructors" {
     const allocator = std.testing.allocator;
 
     {
-        const constructor = try TLConstructor.parse(allocator, "test.test2.flagstest flags2:# test:flags2.0?asd = aaaa", sections.TLSection.Types);
+        var constructor = try TLConstructor.parse(allocator, "test.test2.flagstest flags2:# test:flags2.0?asd = aaaa", sections.TLSection.Types);
         defer constructor.deinit();
 
         try std.testing.expectEqualStrings(constructor.name, "flagstest");
@@ -216,11 +216,11 @@ test "parse constructors" {
 
         try std.testing.expectEqualStrings("flags2", constructor.params.items[0].name);
         try std.testing.expect(!constructor.params.items[0].type_def);
-        try std.testing.expect(constructor.params.items[0].type.? == parameters_type.TLParameterTypeTag.Flags);
+        try std.testing.expect(constructor.params.items[0].type.? == .Flags);
 
         try std.testing.expectEqualStrings("test", constructor.params.items[1].name);
         try std.testing.expect(!constructor.params.items[1].type_def);
-        try std.testing.expect(constructor.params.items[1].type.? == parameters_type.TLParameterTypeTag.Normal);
+        try std.testing.expect(constructor.params.items[1].type.? == .Normal);
         try std.testing.expect(constructor.params.items[1].type.?.Normal.flag != null);
         try std.testing.expectEqualStrings("flags2", constructor.params.items[1].type.?.Normal.flag.?.name);
         try std.testing.expectEqual(0, constructor.params.items[1].type.?.Normal.flag.?.index);
