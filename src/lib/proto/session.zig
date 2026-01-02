@@ -21,8 +21,8 @@ const utils = @import("./utils.zig");
 
 pub fn isContentRelated(obj: tl.TL) bool {
     return switch (obj) {
-        
-        // A client must never mark msgs_ack, msg_container, msg_copy, gzip_packed constructors (i.e. containers and acknowledgements) 
+
+        // A client must never mark msgs_ack, msg_container, msg_copy, gzip_packed constructors (i.e. containers and acknowledgements)
         // as content-related, or else a bad_msg_notification with error_code=34 will be emitted.
         .ProtoRpcDropAnswer,
         .ProtoRpcAnswerUnknown,
@@ -51,8 +51,8 @@ pub fn isContentRelated(obj: tl.TL) bool {
         .ProtoMsgResendReq,
         => false,
 
-        // A client must always mark all API-level RPC queries as content-related, 
-        // or else a bad_msg_notification with error_code=35 will be emitted. 
+        // A client must always mark all API-level RPC queries as content-related,
+        // or else a bad_msg_notification with error_code=35 will be emitted.
         else => true,
     };
 }
@@ -65,12 +65,17 @@ is_test_mode: bool,
 is_cdn: bool,
 
 seq_no: usize,
-//salts: std.ArrayList(tl.ProtoFutureSalt),
-salt: tl.ProtoFutureSalt,
+
+salts: std.ArrayList(tl.ProtoFutureSalt),
+
+pending_ack: std.ArrayList(u64),
+
+//salt: tl.ProtoFutureSalt,
 auth_key: [256]u8,
 auth_key_id: [8]u8,
 session_id: u64,
 message_id: MessageID,
+arena: std.heap.ArenaAllocator,
 
 pub const EncryptionError = error{
     AuthKeyMismatch,
@@ -82,6 +87,7 @@ pub const EncryptionError = error{
 pub const SessionError = error{
     Transport404,
     TransportUnknown,
+    UnknownIncomingMessage,
 };
 
 /// Generates the next sequence number for a message.
@@ -113,8 +119,80 @@ pub fn sendMessageTransport(self: *Session, transport: *Transport, io: std.Io, a
     try transport.write(encrypted);
 }
 
-pub fn recvMessageTransport(self: *Session, transport: *Transport, allocator: std.mem.Allocator) !utils.DeserializedMessage {
+fn handleMsgsAck(self: *Session, message: tl.ProtoMessage) !void {
+    _ = self;
+    _ = message;
+}
+
+fn handleBadNotification(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
+    var size: usize = 0;
+    _ = tl.IProtoBadMsgNotification.deserializeSize(message.body, &size);
+    const allocator = self.arena.allocator();
+
+    const buf = try allocator.alloc(u8, size);
+    defer allocator.free(buf);
+
+    const bad_msg, _, _ = tl.IProtoBadMsgNotification.deserialize(message.body, &buf);
+
+    switch (bad_msg) {
+        .ProtoBadServerSalt => |x| {
+            self.salts.clearAndFree(allocator);
+            try self.salts.append(allocator, .{
+                .salt = x.new_server_salt,
+                .valid_since = self.message_id.get(io),
+                .valid_until = std.math.maxInt(i32),
+            });
+        },
+        .ProtoBadMsgNotification => |x| {
+            switch (x.error_code) {
+                // msg_id too low (most likely, client time is wrong;
+                // it would be worthwhile to synchronize it using msg_id notifications
+                // and re-send the original message with the “correct” msg_id or wrap it in a
+                // container with a new msg_id if the original message had waited too long on the client to be transmitted)
+                16 => {
+                    self.message_id.updateTime(io, message.msg_id >> 32);
+                },
+                // msg_id too high (similar to the previous case, the client time has to be synchronized,
+                // and the message re-sent with the correct msg_id)
+                17 => {
+                    self.message_id.updateTime(io, message.msg_id >> 32);
+                },
+                // msg_seqno too low (the server has already received a message with a lower msg_id but with either
+                // a higher or an equal and odd seqno)
+                32 => {
+                    self.seq_no += 64;
+                },
+                // msg_seqno too high (similarly, there is a message
+                // with a higher msg_id but with either a lower or an equal and odd seqno)
+                33 => {
+                    self.seq_no -= 16;
+                },
+            }
+        },
+    }
+}
+
+fn processMessage(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
+    //const allocator = self.arena.allocator();
+
+    const id = std.mem.readInt(u32, message.body[0..4], .little);
+    if (tl.TL.identify(id)) |ty| {
+        switch (ty) {
+            .ProtoRPCResult => unreachable,
+            .ProtoMsgsAck => self.handleMsgsAck(message),
+            .ProtoBadMsgNotification, .ProtoBadMsgNotification => self.handleBadNotification(io, message),
+            else => {
+                std.debug.print("got {any} to handle", .{ty});
+            },
+        }
+    } else {
+        return SessionError.UnknownIncomingMessage;
+    }
+}
+
+pub fn recvMessageTransport(self: *Session, transport: *Transport) !tl.ProtoMessage2 {
     const len = try transport.recvLen();
+    const allocator = self.arena.allocator();
 
     const buf = try allocator.alloc(u8, len);
     defer allocator.free(buf);
@@ -140,12 +218,13 @@ pub fn recvMessageTransport(self: *Session, transport: *Transport, allocator: st
     const des = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoMessage), size);
     errdefer allocator.free(des);
 
-    const message = tl.ProtoMessage.deserialize(message_bytes, des);
+    const id = std.mem.readInt(u32, message_bytes[0..4], .little);
 
-    return utils.DeserializedMessage{
-        .data = message[0],
-        .ptr = des,
-    };
+    std.debug.print("type: {any}\n", .{tl.TL.identify(id)});
+
+    const message = tl.ProtoMessage.deserializeNoCopy(message_bytes);
+
+    return message;
 }
 
 /// Decrypts an encrypted message in-place.
@@ -228,14 +307,22 @@ fn encryptMessage(self: *const Session, allocator: std.mem.Allocator, data: []co
     const buf = try allocator.alloc(u8, len_headers + len_encrypted);
     errdefer allocator.free(buf);
 
+    const offset_salt = len_headers;
+    const offset_session_id = offset_salt + 8;
+    const offset_message_id = offset_session_id + 8;
+    const offset_seqno = offset_message_id + 8;
+    const offset_len_data = offset_seqno + 4;
+    const offset_data = offset_len_data + 4;
+    const offset_padding = offset_data + data.len;
+
     // write data to encrypt
-    std.mem.writeInt(u64, buf[len_headers .. len_headers + 8], self.salt.salt, .little);
-    std.mem.writeInt(u64, buf[len_headers + 8 .. len_headers + 8 + 8], self.session_id, .little);
-    std.mem.writeInt(u64, buf[len_headers + 8 + 8 .. len_headers + 8 + 8 + 8], message_id, .little);
-    std.mem.writeInt(u32, buf[len_headers + 8 + 8 + 8 .. len_headers + 8 + 8 + 8 + 4], @intCast(seqno), .little);
-    std.mem.writeInt(u32, buf[len_headers + 8 + 8 + 8 + 4 .. len_headers + 8 + 8 + 8 + 4 + 4], @intCast(data.len), .little);
-    @memcpy(buf[len_headers + 8 + 8 + 8 + 4 + 4 .. len_headers + 8 + 8 + 8 + 4 + 4 + data.len], data);
-    std.crypto.random.bytes(buf[len_headers + 8 + 8 + 8 + 4 + 4 + data.len .. len_headers + 8 + 8 + 8 + 4 + 4 + data.len + padding]);
+    std.mem.writeInt(u64, buf[offset_salt..offset_session_id], self.salt.salt, .little);
+    std.mem.writeInt(u64, buf[offset_session_id..offset_message_id], self.session_id, .little);
+    std.mem.writeInt(u64, buf[offset_message_id..offset_seqno], message_id, .little);
+    std.mem.writeInt(u32, buf[offset_seqno..offset_len_data], @intCast(seqno), .little);
+    std.mem.writeInt(u32, buf[offset_len_data..offset_data], @intCast(data.len), .little);
+    @memcpy(buf[offset_data..offset_padding], data);
+    std.crypto.random.bytes(buf[offset_padding .. offset_padding + padding]);
 
     // Write auth_key_id
     @memcpy(buf[0..8], &self.auth_key_id);
@@ -274,7 +361,11 @@ fn encryptMessage(self: *const Session, allocator: std.mem.Allocator, data: []co
     return buf;
 }
 
-pub fn init(io: std.Io, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, test_mode: bool, is_cdn: bool, is_media: bool) !Session {
+pub fn deinit(self: *Session) !void {
+    self.arena.deinit();
+}
+
+pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, test_mode: bool, is_cdn: bool, is_media: bool) !Session {
     var self = Session{
         .dc_id = dc_id,
         .is_test_mode = test_mode,
@@ -282,10 +373,11 @@ pub fn init(io: std.Io, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, 
         .is_cdn = is_cdn,
         .is_media = is_media,
         .seq_no = 0,
-        .salt = salt,
+        .salts = .{},
         .auth_key = auth_key,
         .session_id = std.crypto.random.int(u64),
         .auth_key_id = undefined,
+        .arena = std.heap.ArenaAllocator.init(allocator),
     };
 
     // The authorization key id is the 64 lower-bits of the SHA1 hash of the
@@ -297,6 +389,8 @@ pub fn init(io: std.Io, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, 
     // Update the message_id time with the system host's time.
     // We use this one as the "best guess", if we receive a bad_msg_notification, then we synchronize it with the expected time
     try self.message_id.updateTime(io, @intCast((try std.Io.Clock.now(.real, io)).toSeconds()));
+
+    try self.salts.append(self.arena.allocator(), salt);
 
     return self;
 }

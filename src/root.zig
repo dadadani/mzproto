@@ -27,10 +27,11 @@ test {
 pub fn generate_dev() !void {
     var allocator = std.heap.DebugAllocator(.{}){};
     defer {
-        _ = allocator.deinit();
+        const ok = allocator.deinit();
+        std.debug.print("dealloc: {any}", .{ok});
     }
 
-    var io = std.Io.Threaded.init(allocator.allocator());
+    var io = std.Io.Threaded.init(allocator.allocator(), .{});
     defer io.deinit();
 
     const ip = try std.Io.net.IpAddress.parse("149.154.167.40", 443);
@@ -53,22 +54,22 @@ pub fn generate_dev() !void {
 
     stream.close(io.io());
 
-    stream = try ip.connect(io.io(), .{ .mode = .stream, .protocol = .tcp });
-    writer = stream.writer(io.io(), &bufWrite);
-    reader = stream.reader(io.io(), &bufRead);
+    //stream = try ip.connect(io.io(), .{ .mode = .stream, .protocol = .tcp });
+    //writer = stream.writer(io.io(), &bufWrite);
+    //  reader = stream.reader(io.io(), &bufRead);
 
-    transport = try .init(.Abridged, &writer.interface, &reader.interface);
+    //    transport = try .init(.Abridged, &writer.interface, &reader.interface);
 
-    var session = try Session.init(io.io(), gen_key.authKey, tl.ProtoFutureSalt{
-        .salt = gen_key.first_salt,
-        .valid_since = 0,
-        .valid_until = 0,
-    }, 2, true, false, false);
+    //  var session = try Session.init(io.io(), gen_key.authKey, tl.ProtoFutureSalt{
+    //    .salt = gen_key.first_salt,
+    //       .valid_since = 0,
+    //     .valid_until = 0,
+    // }, 2, true, false, false);
 
-    try session.sendMessageTransport(&transport, io.io(), allocator.allocator(), tl.TL{ .ProtoPing = &tl.ProtoPing{ .ping_id = 43242 } });
-    std.debug.print("sent ping\n", .{});
+    //try session.sendMessageTransport(&transport, io.io(), allocator.allocator(), tl.TL{ .ProtoPing = &tl.ProtoPing{ .ping_id = 43242 } });
+    //  std.debug.print("sent ping\n", .{});
 
-    const message = try session.recvMessageTransport(&transport, allocator.allocator());
-    defer allocator.allocator().free(message.ptr);
-    std.debug.print("recv message: {any}\n", .{message.data});
+    // const message = try session.recvMessageTransport(&transport, allocator.allocator());
+    // defer allocator.allocator().free(message.ptr);
+    // std.debug.print("recv message: {any}\n", .{message.data});
 }

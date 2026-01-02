@@ -14,80 +14,131 @@
 
 const std = @import("std");
 
-pub fn ProtoMessage(comptime ty: type) type {
-    return struct {
-        msg_id: u64,
-        seqno: i32,
-        body: ty,
+pub const ProtoMessage = struct {
+    msg_id: u64,
+    seqno: i32,
+    body: []const u8,
 
-        pub fn deserializeSize(in: []const u8, size: *usize) usize {
-            std.debug.print("in: {any}\n", .{in});
-            var read: usize = 0;
-            size.* += @sizeOf(@This());
+    pub fn deserializeNoCopy(in: []const u8) @This() {
+        var read: usize = 0;
+        var self: @This() = undefined;
 
-            read += 8; // msg_id
-            read += 4; // seqno
+        self.msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
+        read += 8;
 
-            const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-            read += 4;
+        self.seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+        read += 4;
 
-            std.debug.print("bytes to read: {d}\n", .{bytes});
+        const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+        read += 4;
 
-            return ty.deserializeSize(in[read .. read + bytes], size);
-        }
+        self.body = in[read .. read + bytes];
 
-        pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-            var written: usize = @sizeOf(@This());
-            var read: usize = 0;
-            const self = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
+        return self;
+    }
+};
 
-            self.msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
+pub const ProtoMessageContainer = struct {
+    pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) ![]ProtoMessage {
+        const len = std.mem.readInt(u32, in[0..4], .little);
+
+        const container = try allocator.alloc(u8, len);
+        errdefer allocator.free(container);
+
+        var read: usize = 0;
+
+        for (0..len) |i| {
+            container[i].msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
             read += 8;
 
-            self.seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            container[i].seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
             read += 4;
 
             const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
             read += 4;
 
-            const d = ty.deserialize(in[read .. read + bytes], out[written..]);
-            self.body = d[0];
-            written += d[1];
-            read += d[2];
+            container[i].body = in[read .. read + bytes];
 
-            return .{ self, written, read };
+            read += bytes;
         }
-    };
-}
 
-pub fn MessageContainer(comptime ty: type) type {
+        return container;
+    }
+
+    pub fn serializeSize(self: *const @This()) usize {
+        _ = self;
+        unreachable;
+    }
+
+    pub fn serialize(self: *const @This(), dest: []u8) usize {
+        _ = self;
+        _ = dest;
+        unreachable;
+    }
+
+    pub fn deserializeSize(in: []const u8, size: *usize) usize {
+        // we only use deserializeNoCopy on this one
+        _ = in;
+        _ = size;
+        unreachable;
+    }
+
+    pub fn cloneSize(self: *const @This(), size: *usize) void {
+        // not needed
+        _ = self;
+        _ = size;
+        unreachable;
+    }
+
+    pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
+        // not needed
+        _ = self;
+        _ = out;
+        unreachable;
+    }
+
+    pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
+        // we only use deserializeNoCopy on this one
+        _ = in;
+        _ = out;
+        unreachable;
+    }
+};
+
+pub fn ProtoFutureSalts(comptime ProtoFutureSalt: type) type {
     return struct {
-        messages: []const ProtoMessage(ty),
+        req_msg_id: u64,
+        now: u32,
+        salts: []const ProtoFutureSalt,
 
         pub fn serializeSize(self: *const @This()) usize {
-            var result: usize = 4;
-            for (self.messages) |message| {
-                result += 16 + message.body.serializeSize();
+            return 16 + (self.salts.len * 16);
+        }
+
+        pub fn serialize(self: *const @This(), dest: []u8) usize {
+            var written: usize = 0;
+            written += serializeInt(self.req_msg_id, dest[written..]);
+            written += serializeInt(self.now, dest[written..]);
+            written += serializeInt(self.salts.len, dest[written..]);
+            for (self.salts) |salt| {
+                written += serializeInt(salt.valid_since, dest[written..]);
+                written += serializeInt(salt.valid_until, dest[written..]);
+                written += serializeInt(salt.salt, dest[written..]);
             }
-            return result;
+            return written;
         }
 
         pub fn deserializeSize(in: []const u8, size: *usize) usize {
-            var read: usize = 0;
             size.* += @sizeOf(@This());
+            var read: usize = 12;
 
             const len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
             read += 4;
 
-            size.* += ensureAligned(size.*, @alignOf([]const ProtoMessage(ty)));
-            size.* += len * @sizeOf(ProtoMessage(ty));
+            size.* += ensureAligned(size.*, @alignOf([]const ProtoFutureSalt));
+            size.* += len * @sizeOf(ProtoFutureSalt);
             for (0..len) |_| {
-                read += 12;
-                const body_len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-                read += 4;
-
-                _ = ty.deserializeSize(in[read .. read + body_len], size);
-                read += body_len;
+                read += 16;
             }
             return read;
         }
@@ -95,244 +146,103 @@ pub fn MessageContainer(comptime ty: type) type {
         pub fn cloneSize(self: *const @This(), size: *usize) void {
             size.* += @sizeOf(@This());
 
-            size.* += ensureAligned(size.*, @alignOf([]const ProtoMessage(ty)));
-            size.* += self.messages.len * @sizeOf(ProtoMessage(ty));
-
-            for (self.messages) |message| {
-                message.body.cloneSize(size);
-            }
+            size.* += ensureAligned(size.*, @alignOf([]const ProtoFutureSalt));
+            size.* += self.salts.len * @sizeOf(ProtoFutureSalt);
         }
 
         pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const result = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
-            var written: usize = @sizeOf(@This());
-
-            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf([]const ty));
-            //result.messages = @as([]const ProtoMessage(ty), @ptrCast(@alignCast(dest[size.* .. size.* + (@sizeOf(ProtoMessage(ty)) * self.messages.len)])));
-            // @constCast(@as(@TypeOf(result.messages), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(result.messages)), dest[written.* .. written.* + (len * @sizeOf(unwrapType(@TypeOf(result.messages))))]))));
-            result.messages = @as([]const ProtoMessage(ty), @alignCast(std.mem.bytesAsSlice(ProtoMessage(ty), out[written .. written + (@sizeOf(ProtoMessage(ty)) * self.messages.len)])));
-            @memcpy(@constCast(result.messages), self.messages);
-            written += @sizeOf(ProtoMessage(ty)) * self.messages.len;
-
-            const messages = @constCast(result.messages);
-
-            for (0..self.messages.len) |i| {
-                const d = self.messages[i].body.clone(out[written..]);
-                messages[i].body = d[0];
-                written += d[1];
-            }
-
-            return .{ result, written };
-        }
-
-        pub fn serialize(self: *const @This(), dest: []u8) usize {
             var written: usize = 0;
+            const self_out = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
 
-            //  written += serializeInt(@as(u32, 0x73f1f8dc), dest[written..]);
+            self_out.req_msg_id = self.req_msg_id;
+            self_out.now = self.now;
 
-            written += serializeInt(@as(usize, self.messages.len), dest[written..]);
+            written += @sizeOf(@This());
 
-            for (self.messages) |message| {
-                written += serializeInt(message.msg_id, dest[written..]);
-                written += serializeInt(message.seqno, dest[written..]);
+            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf([]const ProtoFutureSalt));
+            //result.salts = @as([]const FutureSalt, @alignCast());
+            self_out.salts = @as([]const ProtoFutureSalt, @alignCast(std.mem.bytesAsSlice(ProtoFutureSalt, written[written .. written + (self.salts.len * @sizeOf(ProtoFutureSalt))])));
+            @memcpy(@constCast(self_out.salts), self.salts);
+            written += self.salts.len * @sizeOf(ProtoFutureSalt);
 
-                const tlWritten = message.body.serialize(dest[written + 4 ..]);
-
-                written += serializeInt(tlWritten, dest[written..]) + tlWritten;
-            }
-
-            return written;
+            return .{ self_out, written };
         }
-        pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
+
+        pub fn deserialize(src: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
+            //const alignment = ensureAligned(written.*, @alignOf(*@This()));
+
+            const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
             var written: usize = @sizeOf(@This());
             var read: usize = 0;
-            const self = @as(*@This(), @ptrCast(@alignCast(out[0..@sizeOf(@This())].ptr)));
 
-            //const alignment = ensureAligned(written.*, @alignOf(*@This()));
-            //const result = @as(*@This(), @alignCast(@ptrCast(dest[written.* + alignment ..].ptr)));
-            //written.* += alignment + @sizeOf(@This());
+            read += deserializeInt(unwrapType(@TypeOf(self.req_msg_id)), src[read..], &self.req_msg_id);
+            read += deserializeInt(unwrapType(@TypeOf(self.now)), src[read..], &self.now);
 
-            const len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            const len = std.mem.readInt(u32, @ptrCast(src[read .. read + 4]), std.builtin.Endian.little);
             read += 4;
 
-            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf(@TypeOf(self.messages)));
-            const vector = @constCast(@as(@TypeOf(self.messages), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(self.messages)), out[written .. written + (len * @sizeOf(unwrapType(@TypeOf(self.messages))))]))));
-            written += @sizeOf(unwrapType(@TypeOf(self.messages))) * len;
+            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf(@TypeOf(self.salts)));
+            const vector = @constCast(@as(@TypeOf(self.salts), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(self.salts)), out[written .. written + (len * @sizeOf(unwrapType(@TypeOf(self.salts))))]))));
+            written += @sizeOf(unwrapType(@TypeOf(self.salts))) * len;
 
             for (0..len) |i| {
-                read += deserializeInt(unwrapType(@TypeOf(vector[i].msg_id)), in[read..], &vector[i].msg_id);
-                read += deserializeInt(unwrapType(@TypeOf(vector[i].seqno)), in[read..], &vector[i].seqno);
-                const bodylen = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-                read += 4;
-                //vector[i].body = ty.deserialize(src[0 .. cursor.* + bodylen], dest, cursor, written);
-                const d = ty.deserialize(in[read .. read + bodylen], out[written..]);
-                vector[i].body = d[0];
-                written += d[1];
-                read += bodylen;
+                read += deserializeInt(unwrapType(@TypeOf(vector[i].valid_since)), src[read..], &vector[i].valid_since);
+                read += deserializeInt(unwrapType(@TypeOf(vector[i].valid_until)), src[read..], &vector[i].valid_until);
+                read += deserializeInt(unwrapType(@TypeOf(vector[i].salt)), src[read..], &vector[i].salt);
             }
 
-            self.messages = vector;
+            self.salts = vector;
 
             return .{ self, written, read };
         }
     };
 }
-
-pub const FutureSalt = struct {
-    valid_since: u32,
-    valid_until: u32,
-    salt: u64,
-};
-
-pub const FutureSalts = struct {
-    req_msg_id: u64,
-    now: u32,
-    salts: []const FutureSalt,
-
-    pub fn serializeSize(self: *const @This()) usize {
-        return 16 + (self.salts.len * 16);
-    }
-
-    pub fn serialize(self: *const @This(), dest: []u8) usize {
-        var written: usize = 0;
-        written += serializeInt(self.req_msg_id, dest[written..]);
-        written += serializeInt(self.now, dest[written..]);
-        written += serializeInt(self.salts.len, dest[written..]);
-        for (self.salts) |salt| {
-            written += serializeInt(salt.valid_since, dest[written..]);
-            written += serializeInt(salt.valid_until, dest[written..]);
-            written += serializeInt(salt.salt, dest[written..]);
-        }
-        return written;
-    }
-
-    pub fn deserializeSize(in: []const u8, size: *usize) usize {
-        size.* += @sizeOf(@This());
-        var read: usize = 12;
-
-        const len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-        read += 4;
-
-        size.* += ensureAligned(size.*, @alignOf([]const FutureSalt));
-        size.* += len * @sizeOf(FutureSalt);
-        for (0..len) |_| {
-            read += 16;
-        }
-        return read;
-    }
-
-    pub fn cloneSize(self: *const @This(), size: *usize) void {
-        size.* += @sizeOf(@This());
-
-        size.* += ensureAligned(size.*, @alignOf([]const FutureSalt));
-        size.* += self.salts.len * @sizeOf(FutureSalt);
-    }
-
-    pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-        var written: usize = 0;
-        const self_out = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-
-        self_out.req_msg_id = self.req_msg_id;
-        self_out.now = self.now;
-
-        written += @sizeOf(@This());
-
-        written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf([]const FutureSalt));
-        //result.salts = @as([]const FutureSalt, @alignCast());
-        self_out.salts = @as([]const FutureSalt, @alignCast(std.mem.bytesAsSlice(FutureSalt, written[written .. written + (self.salts.len * @sizeOf(FutureSalt))])));
-        @memcpy(@constCast(self_out.salts), self.salts);
-        written += self.salts.len * @sizeOf(FutureSalt);
-
-        return .{ self_out, written };
-    }
-
-    pub fn deserialize(src: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-        //const alignment = ensureAligned(written.*, @alignOf(*@This()));
-
-        const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-        var written: usize = @sizeOf(@This());
-        var read: usize = 0;
-
-        read += deserializeInt(unwrapType(@TypeOf(self.req_msg_id)), src[read..], &self.req_msg_id);
-        read += deserializeInt(unwrapType(@TypeOf(self.now)), src[read..], &self.now);
-
-        const len = std.mem.readInt(u32, @ptrCast(src[read .. read + 4]), std.builtin.Endian.little);
-        read += 4;
-
-        written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf(@TypeOf(self.salts)));
-        const vector = @constCast(@as(@TypeOf(self.salts), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(self.salts)), out[written .. written + (len * @sizeOf(unwrapType(@TypeOf(self.salts))))]))));
-        written += @sizeOf(unwrapType(@TypeOf(self.salts))) * len;
-
-        for (0..len) |i| {
-            read += deserializeInt(unwrapType(@TypeOf(vector[i].valid_since)), src[read..], &vector[i].valid_since);
-            read += deserializeInt(unwrapType(@TypeOf(vector[i].valid_until)), src[read..], &vector[i].valid_until);
-            read += deserializeInt(unwrapType(@TypeOf(vector[i].salt)), src[read..], &vector[i].salt);
-        }
-
-        self.salts = vector;
-
-        return .{ self, written, read };
-    }
-};
-
-pub fn RPCResult(comptime ty: type) type {
+pub fn ProtoRPCResult() type {
     return struct {
         req_msg_id: u64,
-        body: ty,
+        body: []const u8,
+
+        pub fn deserializeNoCopy(in: []const u8) @This() {
+            return .{ .req_msg_id = std.mem.readInt(u64, in[0..8], .little), .body = in[8..] };
+        }
 
         pub fn serializeSize(self: *const @This()) usize {
-            return 8 + self.body.serializeSize();
+            _ = self;
+            unreachable;
         }
 
         pub fn serialize(self: *const @This(), dest: []u8) usize {
-            var written: usize = 0;
-
-            written += serializeInt(self.req_msg_id, dest[written..]);
-
-            written += self.body.serialize(dest[written..]);
-
-            return written;
+            _ = self;
+            _ = dest;
+            unreachable;
         }
 
         pub fn deserializeSize(in: []const u8, size: *usize) usize {
-            size.* += @sizeOf(@This());
-
-            const d = ty.deserializeSize(in[8..], size);
-
-            return 8 + d;
+            // we only use deserializeNoCopy on this one
+            _ = in;
+            _ = size;
+            unreachable;
         }
 
         pub fn cloneSize(self: *const @This(), size: *usize) void {
-            size.* += @sizeOf(@This());
-            self.body.cloneSize(size);
+            // not needed
+            _ = self;
+            _ = size;
+            unreachable;
         }
 
         pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const result = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-            var written: usize = @sizeOf(@This());
-
-            result.req_msg_id = self.req_msg_id;
-            const d = self.body.clone(out[written..]);
-            result.body = d[0];
-            written += d[1];
-
-            return .{ result, written };
+            // not needed
+            _ = self;
+            _ = out;
+            unreachable;
         }
 
         pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-            const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-            var written: usize = @sizeOf(@This());
-            var read: usize = 0;
-
-            read += deserializeInt(unwrapType(@TypeOf(self.req_msg_id)), in[read .. read + 8], &self.req_msg_id);
-
-            const d = ty.deserialize(in[read..], out[written..]);
-
-            self.body = d[0];
-            written += d[1];
-            read += d[2];
-
-            return .{ self, written, read };
+            // we only use deserializeNoCopy on this one
+            _ = in;
+            _ = out;
+            unreachable;
         }
     };
 }

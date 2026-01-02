@@ -22,8 +22,8 @@ const TLType = @import("../parser/types.zig").TLType;
 /// The file should contain a comment like `//LAYER #`.
 pub fn findLayer(io: std.Io, filename: []const u8) !?i32 {
     const LAYER_DEF = "LAYER";
-    const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_only });
+    defer file.close(io);
 
     var buffer: [2048]u8 = undefined;
 

@@ -26,7 +26,7 @@ const GeneratorError = error{UnableToFindLayerVersion};
 
 const unions = @import("unions.zig");
 
-fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !std.ArrayList(constructors.TLConstructor) {
+fn parseFile(allocator: std.mem.Allocator, io: std.Io, filename: []const u8) !std.ArrayList(constructors.TLConstructor) {
     var definitions = std.ArrayList(constructors.TLConstructor){};
     errdefer {
         for (definitions.items) |*definition| {
@@ -35,15 +35,17 @@ fn parseFile(allocator: std.mem.Allocator, filename: []const u8) !std.ArrayList(
         definitions.deinit(allocator);
     }
 
-    const file = try std.fs.cwd().openFile(filename, .{ .mode = .read_only });
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_only });
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
 
-    const data = try allocator.alloc(u8, stat.size);
+    var reader = file.reader(io, &.{});
 
-    std.debug.assert(try file.read(data) == stat.size);
+    const data = try reader.interface.readAlloc(allocator, stat.size);
     defer allocator.free(data);
+
+    std.debug.assert(data.len == stat.size);
 
     var iterator = try parser.TlIterator.init(allocator, data);
     defer iterator.deinit();
@@ -69,11 +71,11 @@ pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
             \\
             \\pub const LAYER_VERSION = {d};
             \\
-            \\pub const MessageContainer = base.MessageContainer(TL);
-            \\pub const ProtoMessage = base.ProtoMessage(TL);
-            \\pub const RPCResult = base.RPCResult(TL);
+            \\pub const ProtoMessageContainer = base.ProtoMessageContainer;
+            \\pub const ProtoMessage = base.ProtoMessage;
+            \\pub const ProtoRPCResult = base.ProtoRPCResult();
             \\pub const Vector = base.Vector(TL);
-            \\pub const FutureSalts = base.FutureSalts;
+            \\pub const ProtoFutureSalts = base.ProtoFutureSalts(ProtoFutureSalt);
             \\
             \\
         , .{layer});
@@ -111,8 +113,8 @@ fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMap(s
     }
 }
 
-fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writer: *std.Io.Writer, tl_union_list: *std.ArrayList(TlUnionItem), mtproto: bool) !void {
-    var defs = try parseFile(allocator, filename);
+fn parseAndGenerateFile(allocator: std.mem.Allocator, io: std.Io, filename: []const u8, writer: *std.Io.Writer, tl_union_list: *std.ArrayList(TlUnionItem), mtproto: bool) !void {
+    var defs = try parseFile(allocator, io, filename);
     defer {
         for (defs.items) |*item| {
             item.deinit();
@@ -147,18 +149,16 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, filename: []const u8, writ
 }
 
 pub fn main() !void {
-
-    // open the file to write the schema
-    const file = try std.fs.cwd().createFile("./src/lib/tl/api.zig", .{});
-    defer file.close();
-
-    var writer = file.writer(&.{});
-
     var allocator = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = allocator.deinit();
 
-    var io = std.Io.Threaded.init(allocator.allocator());
+    var io = std.Io.Threaded.init(allocator.allocator(), .{});
     defer io.deinit();
+
+    const file = try std.Io.Dir.cwd().createFile(io.io(), "./src/lib/tl/api.zig", .{});
+    defer file.close(io.io());
+
+    var writer = file.writer(io.io(), &.{});
 
     try boilerplate(io.io(), &writer.interface);
 
@@ -170,8 +170,8 @@ pub fn main() !void {
         tl_union_list.deinit(allocator.allocator());
     }
 
-    try parseAndGenerateFile(allocator.allocator(), "./schema/api.tl", &writer.interface, &tl_union_list, false);
-    try parseAndGenerateFile(allocator.allocator(), "./schema/mtproto.tl", &writer.interface, &tl_union_list, true);
+    try parseAndGenerateFile(allocator.allocator(), io.io(), "./schema/api.tl", &writer.interface, &tl_union_list, false);
+    try parseAndGenerateFile(allocator.allocator(), io.io(), "./schema/mtproto.tl", &writer.interface, &tl_union_list, true);
 
     try unions.generateTLUnion(&tl_union_list, &writer.interface);
 }
