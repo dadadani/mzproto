@@ -18,11 +18,9 @@ const std = @import("std");
 
 pub const Error = error{ LengthNotRead, LengthAlreadyConsumed };
 
-pub const Transports = enum {
-    Abridged,
-};
+pub const Transports = std.meta.Tag(Transport);
 
-pub const Transport = union(Transports) {
+pub const Transport = union(enum) {
     Abridged: Abridged,
 
     pub fn init(transport_mode: Transports, writer: *std.Io.Writer, reader: *std.Io.Reader) !Transport {

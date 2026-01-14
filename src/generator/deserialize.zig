@@ -14,7 +14,281 @@
 
 const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
+const TLType = @import("../parser/types.zig").TLType;
 const utils = @import("./utils.zig");
+
+pub fn generateConstructorResultDeserializeSize(allocator: std.mem.Allocator, ty: *const TLType, writer: *std.Io.Writer, mtproto: bool) !void {
+    try writer.print(
+        \\    pub fn deserializeResultSize(in: []const u8, size: *usize) usize {{
+        \\    
+    , .{});
+
+    //_ = constructorName;
+
+    var inUsed = false;
+    var sizeMutated = false;
+
+    try writer.print(
+        \\        var read: usize = 0;
+        \\
+    , .{});
+
+    var actual_type = ty;
+    var counter: usize = 0;
+
+    while (actual_type.generic_arg) |generic_arg| {
+        counter += 1;
+        if (std.mem.eql(u8, ty.name, "Vector")) {
+            const str_type = try utils.typeToZig(allocator, actual_type, mtproto);
+            defer allocator.free(str_type);
+            inUsed = true;
+            sizeMutated = true;
+
+            try writer.print(
+                \\        const len_{s}_{d} = base.vectorLen(in[read..], &read);
+                \\        size.* += (@alignOf(TL) - 1) + len_{s}_{d} * @sizeOf(TL);
+                \\          
+                \\        for (0..len_{s}_{d}) |_| {{
+                \\
+            , .{ "res", counter, "res", counter, "res", counter });
+            actual_type = generic_arg;
+        } else {
+            return utils.TypeToZigError.UnsupportedGenericArgument;
+        }
+    }
+
+    if (utils.tlPrimitiveName(actual_type.name)) |primitive| {
+        if (std.mem.eql(u8, primitive, "[]const u8")) {
+            inUsed = true;
+            sizeMutated = true;
+            try writer.print(
+                \\        size.* += base.strDeserializedSize(in[read..], &read);
+                \\
+            , .{});
+        } else if (std.mem.eql(u8, primitive, "bool")) {
+            try writer.print(
+                \\        read += 4;
+                \\
+            , .{});
+        } else {
+            try writer.print(
+                \\        read += @sizeOf({s});
+                \\
+            , .{primitive});
+        }
+    } else {
+        if (actual_type.generic_ref) {
+            inUsed = true;
+            sizeMutated = true;
+            try writer.print(
+                \\        read += TL.deserializeSize(in[read..], size);
+                \\
+            , .{});
+        } else {
+            const str_type = try utils.typeToZig(allocator, actual_type, mtproto);
+            defer allocator.free(str_type);
+            inUsed = true;
+            sizeMutated = true;
+            try writer.print(
+                \\        read += {s}.deserializeSize(in[read..], size);
+                \\
+            , .{str_type});
+        }
+    }
+
+    actual_type = ty;
+
+    while (actual_type.generic_arg) |generic_arg| {
+        try writer.print(
+            \\        }}
+            \\
+        , .{});
+        actual_type = generic_arg;
+    }
+
+    if (!inUsed) {
+        try writer.print(
+            \\        _ = in;
+            \\
+        , .{});
+    }
+
+    if (!sizeMutated) {
+        try writer.print(
+            \\        _ = size;
+            \\
+        , .{});
+    }
+
+    try writer.print(
+        \\        return read;
+        \\    }}
+        \\
+    , .{});
+}
+
+pub fn generateConstructorResultDeserialize(allocator: std.mem.Allocator, ty: *const TLType, writer: *std.Io.Writer, mtproto: bool) !void {
+    try writer.print(
+        \\    pub fn deserializeResult(noalias in: []const u8, noalias out: []u8) struct {{TL, usize, usize}} {{
+        \\
+    , .{});
+
+    var flagsUnusedMap = std.StringHashMap(bool).init(allocator);
+    defer flagsUnusedMap.deinit();
+
+    var writtenMutated = false;
+    var outUsed = false;
+
+    try writer.print(
+        \\        var self: TL = undefined;
+        \\        var written: usize = 0;
+        \\        var read: usize = 0;
+        \\
+    , .{});
+
+    var param_name = try allocator.dupe(u8, "self");
+    defer allocator.free(param_name);
+
+    var actual_type = ty;
+    var counter: usize = 1;
+
+    while (actual_type.generic_arg) |generic_arg| {
+        if (std.mem.eql(u8, ty.name, "Vector")) {
+            const str_type = try utils.typeToZig(allocator, actual_type, mtproto);
+            defer allocator.free(str_type);
+            writtenMutated = true;
+            outUsed = true;
+
+            try writer.print(
+                \\        const len_{s}_{d} = base.vectorLen(in[read..], &read);
+                \\        const v_{s}_{d} = v: {{
+                \\            const sliced = base.bytesToSlice(out[written..], len_{s}_{d}, TL);
+                \\            written += sliced[1];
+                \\            break :v sliced[0];
+                \\        }};
+                \\        {s} = TL{{ .Vector = v_{s}_{d} }};
+                \\          
+                \\        for (0..len_{s}_{d}) |i_{s}_{d}| {{
+                \\
+            , .{
+                "res", counter, //len_{s}_{d}
+                "res", counter, //v_{s}_{d}
+                "res", counter, //en..], len_{s}_{d}, bas
+                //     str_type, //rapType({s}));
+                param_name, //{s} =
+                "res", counter, //= v_{s}_{d};
+                "res", counter, //for (0..len_{s}_{d})
+                "res", counter, //|i_{s}_{d}| {{
+            });
+
+            if (counter == 1) {
+                const slice_name = try std.fmt.allocPrint(allocator, "v_{s}_{d}[i_{s}_{d}]", .{ "res", counter, "res", counter });
+                allocator.free(param_name);
+                param_name = slice_name;
+            } else {
+                @panic("TODO: implement nested vectors");
+            }
+
+            actual_type = generic_arg;
+            counter += 1;
+        } else {
+            return utils.TypeToZigError.UnsupportedGenericArgument;
+        }
+    }
+
+    if (utils.tlPrimitiveName(actual_type.name)) |primitive| {
+        if (std.mem.eql(u8, primitive, "[]const u8")) {
+            writtenMutated = true;
+            outUsed = true;
+            try writer.print(
+                \\        {{
+                \\            const d = base.deserializeString(in[read..], out[written..]);
+                \\            {s} = TL{{.Bytes = out[written..written+d[0]]}};
+                \\            written += d[0];
+                \\            read += d[1];
+                \\        }}
+            , .{param_name});
+        } else if (std.mem.eql(u8, primitive, "bool")) {
+            try writer.print(
+                \\        {{
+                \\            const d = std.mem.readInt(u32, @ptrCast(in[read..read+4]), std.builtin.Endian.little);
+                \\            read += 4;
+                \\            if (d == 0x997275b5) {{
+                \\                {s} = TL{{.Bool = true}};
+                \\            }} else if (d == 0xbc799737) {{
+                \\                {s} = TL{{.Bool = false}};
+                \\            }} else {{
+                \\                unreachable; // TODO: do something else     
+                \\            }}
+                \\            
+                \\        }}
+                \\
+            , .{ param_name, param_name });
+        } else if (std.mem.eql(u8, primitive, "f64")) {
+            try writer.print(
+                \\        {{
+                \\            const d = std.mem.readInt(u64, @ptrCast(in[read..read+@sizeOf(u64)]), std.builtin.Endian.little);
+                \\            read += @sizeOf(f64);
+                \\            {s} = TL{{.Double = @bitCast(d)}};
+                \\        }}
+                \\
+            , .{param_name});
+        } else {
+            try writer.print(
+                \\        {{
+                \\            const d = std.mem.readInt({s}, @ptrCast(in[read..read+@sizeOf({s})]), std.builtin.Endian.little);
+                \\            read += @sizeOf({s});
+                \\            {s} = base.TLInt(TL, d);
+                \\        }}
+                \\
+            , .{ primitive, primitive, primitive, param_name });
+        }
+    } else {
+        const str_type = try utils.typeToZig(allocator, actual_type, mtproto);
+        defer allocator.free(str_type);
+        writtenMutated = true;
+        outUsed = true;
+        try writer.print(
+            \\        {{
+            \\            const d = base.unwrapType({s}).deserialize(in[read..], out[written..]);
+            \\            {s} = d[0].toTL();
+            \\            written += d[1];
+            \\            read += d[2];
+            \\        }}
+            \\
+        , .{ str_type, param_name });
+    }
+
+    actual_type = ty;
+
+    while (actual_type.generic_arg) |generic_arg| {
+        try writer.print(
+            \\        }}
+            \\
+        , .{});
+        actual_type = generic_arg;
+    }
+
+    if (!outUsed) {
+        try writer.print(
+            \\        _ = out;
+            \\
+        , .{});
+    }
+
+    if (!writtenMutated) {
+        try writer.print(
+            \\        written = written;
+            \\
+        , .{});
+    }
+
+    try writer.print(
+        \\        return .{{self, written, read}};
+        \\    }}
+        \\
+    , .{});
+}
 
 pub fn generateConstructorDeserializeSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {
     try writer.print(
@@ -89,7 +363,7 @@ pub fn generateConstructorDeserializeSize(allocator: std.mem.Allocator, construc
 
                         try writer.print(
                             \\        const len_{s}_{d} = base.vectorLen(in[read..], &read);
-                            \\        size.* = std.mem.alignForward(usize, size.*, @alignOf(base.unwrapType({s}))) + len_{s}_{d} * @sizeOf(base.unwrapType({s}));
+                            \\        size.* += (@alignOf(base.unwrapType({s})) - 1) + len_{s}_{d} * @sizeOf(base.unwrapType({s}));
                             \\          
                             \\        for (0..len_{s}_{d}) |_| {{
                             \\
@@ -326,10 +600,10 @@ pub fn generateConstructorDeserialize(allocator: std.mem.Allocator, constructor:
                             \\            read += 4;
                             \\            if (d == 0x997275b5) {{
                             \\                {s} = true;
-                            \\            }} else if (d == 0x997275b5) {{
+                            \\            }} else if (d == 0xbc799737) {{
                             \\                {s} = false;
                             \\            }} else {{
-                            \\                unreachable; // TODO: use something else     
+                            \\                unreachable; // TODO: do something else     
                             \\            }}
                             \\            
                             \\        }}

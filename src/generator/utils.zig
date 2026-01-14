@@ -198,4 +198,6 @@ pub fn tlPrimitiveName(name: []const u8) ?[]const u8 {
 pub const TlUnionItem = struct {
     name: []u8,
     id: u32,
+    is_function: bool = false,
+    use_param: ?[]u8,
 };

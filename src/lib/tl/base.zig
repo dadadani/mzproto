@@ -42,10 +42,10 @@ pub const ProtoMessageContainer = struct {
     pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) ![]ProtoMessage {
         const len = std.mem.readInt(u32, in[0..4], .little);
 
-        const container = try allocator.alloc(u8, len);
+        const container = try allocator.alloc(ProtoMessage, len);
         errdefer allocator.free(container);
 
-        var read: usize = 0;
+        var read: usize = 4;
 
         for (0..len) |i| {
             container[i].msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
@@ -105,7 +105,27 @@ pub const ProtoMessageContainer = struct {
     }
 };
 
-pub fn ProtoFutureSalts(comptime ProtoFutureSalt: type) type {
+pub fn IProtoFutureSalts(comptime TL: type, comptime ProtoFutureSalt: type) type {
+    const InternalProtoFutureSalts = ProtoFutureSalts(TL, ProtoFutureSalt);
+
+    return struct {
+        pub inline fn deserializeSize(in: []const u8, size: *usize) usize {
+            const id = std.mem.readInt(u32, @ptrCast(in[0..4]), .little);
+            std.debug.assert(id == 0xae500895);
+            size.* += (@alignOf(InternalProtoFutureSalts) - 1);
+            return InternalProtoFutureSalts.deserializeSize(in[4..], size);
+        }
+
+        pub fn deserialize(src: []const u8, out: []u8) struct { *InternalProtoFutureSalts, usize, usize } {
+            const id = std.mem.readInt(u32, @ptrCast(src[0..4]), .little);
+            std.debug.assert(id == 0xae500895);
+
+            return InternalProtoFutureSalts.deserialize(src[4..], @alignCast(out[(@alignOf(InternalProtoFutureSalts) - 1)..]));
+        }
+    };
+}
+
+pub fn ProtoFutureSalts(comptime TL: type, comptime ProtoFutureSalt: type) type {
     return struct {
         req_msg_id: u64,
         now: u32,
@@ -113,6 +133,10 @@ pub fn ProtoFutureSalts(comptime ProtoFutureSalt: type) type {
 
         pub fn serializeSize(self: *const @This()) usize {
             return 16 + (self.salts.len * 16);
+        }
+
+        pub fn toTL(self: *const @This()) TL {
+            return TL{ .ProtoFutureSalts = self };
         }
 
         pub fn serialize(self: *const @This(), dest: []u8) usize {
@@ -247,6 +271,65 @@ pub fn ProtoRPCResult() type {
     };
 }
 
+pub const ProtoRpcError = struct {
+    error_code: u32,
+    error_message: []const u8,
+
+    pub fn deserializeNoCopy(in: []const u8) ProtoRpcError {
+        return .{ .error_code = std.mem.readInt(u32, @ptrCast(in[0 .. 0 + @sizeOf(u32)]), .little), .error_message = deserializeStringNoCopy(in[4..]) };
+    }
+
+    pub fn deserializeSize(in: []const u8, size: *usize) usize {
+        size.* += @sizeOf(ProtoRpcError);
+        var read: usize = 0;
+        read += @sizeOf(u32);
+        size.* += strDeserializedSize(in[read..], &read);
+        return read;
+    }
+    pub fn deserialize(noalias in: []const u8, noalias out: []align(@alignOf(ProtoRpcError)) u8) struct { *ProtoRpcError, usize, usize } {
+        var written: usize = @sizeOf(ProtoRpcError);
+        const self = @as(*ProtoRpcError, @ptrCast(@alignCast(out[0..@sizeOf(ProtoRpcError)])));
+        var read: usize = 0;
+        {
+            const d = std.mem.readInt(u32, @ptrCast(in[read .. read + @sizeOf(u32)]), std.builtin.Endian.little);
+            read += @sizeOf(u32);
+            self.error_code = d;
+        }
+        {
+            const d = deserializeString(in[read..], out[written..]);
+            self.error_message = out[written .. written + d[0]];
+            written += d[0];
+            read += d[1];
+        }
+        return .{ self, written, read };
+    }
+    pub fn serializeSize(self: *const ProtoRpcError) usize {
+        var size: usize = 0;
+        size += @sizeOf(@TypeOf(self.error_code));
+        size += strSerializedSize(self.error_message);
+        return size;
+    }
+    pub fn serialize(self: *const ProtoRpcError, out: []u8) usize {
+        var written: usize = 0;
+        written += serializeInt(self.error_code, out[written..]);
+        written += serializeString(self.error_message, out[written..]);
+        return written;
+    }
+    pub fn cloneSize(self: *const ProtoRpcError, size: *usize) void {
+        size.* += @sizeOf(ProtoRpcError);
+        size.* += self.error_message.len;
+    }
+    pub fn clone(self: *const ProtoRpcError, out: []align(@alignOf(ProtoRpcError)) u8) struct { *ProtoRpcError, usize } {
+        var written: usize = @sizeOf(ProtoRpcError);
+        const self_out: *ProtoRpcError = @ptrCast(@alignCast(out[0..@sizeOf(ProtoRpcError)]));
+        @memcpy(out[0..@sizeOf(ProtoRpcError)], @as([*]const u8, @ptrCast(self))[0..@sizeOf(ProtoRpcError)]);
+        @memcpy(out[written .. written + self.error_message.len], self.error_message);
+        self_out.error_message = out[written .. written + self.error_message.len];
+        written += self.error_message.len;
+        return .{ self_out, written };
+    }
+};
+
 // This type is required by some functions calls that might return a vector
 pub fn Vector(comptime ty: type) type {
     return struct {
@@ -364,74 +447,141 @@ pub fn Vector(comptime ty: type) type {
     };
 }
 
+pub inline fn makePadding(n: anytype, topad: anytype) usize {
+    const remainder = topad % n;
+    return if (remainder == 0) 0 else n - remainder;
+}
+
+/// Returns how many bytes are needed to encode bytes into a TL string. Includes length and padding
 pub fn strSerializedSize(s: []const u8) usize {
-    var result: usize = 0;
-    if (s.len <= 253) {
-        result = 1 + s.len;
-    } else {
-        result = 4 + s.len;
-    }
+    const len_headers: usize =
+        if (s.len <= 253)
+            // If the length of `s` is <= 253, only one byte is sent
+            1
+        else
+            // If the length of `s` is >= 254, we send one byte with value `254` followed by the length as 3 bytes in little-endian order
+            1 + 3;
 
-    while (result % 4 != 0) : (result += 1) {}
+    const len = len_headers + s.len;
 
-    return result;
+    // The total length must be divisible by 4
+    const padding = makePadding(4, len);
+
+    return len + padding;
 }
 
-pub fn serializeString(in: []const u8, out: []u8) usize {
-    var result: usize = 0;
+/// Serializes bytes into a TL encoded string.
+/// Returns how many bytes were written.
+///
+/// You may check how many bytes are needed for the output with `strSerializedSize`.
+pub fn serializeString(noalias in: []const u8, noalias out: []u8) usize {
+    std.debug.assert(in.len <= std.math.maxInt(u24));
+
     if (in.len <= 253) {
+        // I guess most of the time we would have a shorter string
+        @branchHint(.likely);
+
+        // 1 byte for the length, followed by the string itself
+        const len = 1 + in.len;
+        const padding = makePadding(4, len);
+
         out[0] = @intCast(in.len);
-        result = 1;
-
         @memcpy(out[1 .. 1 + in.len], in);
-        result += in.len;
-    } else {
-        out[0] = 254;
-        const len = std.mem.toBytes(std.mem.nativeToLittle(usize, in.len));
-        out[1] = len[0];
-        out[2] = len[1];
-        out[3] = len[2];
-        result = 4;
 
-        @memcpy(out[4 .. 4 + in.len], in);
-        result += in.len;
+        // Set the padding bytes to 0
+        @memset(out[len .. len + padding], 0);
+
+        return len + padding;
     }
 
-    while (result % 4 != 0) {
-        out[result] = 0;
-        result += 1;
-    }
+    // 1 + 3 byte for the length, followed by the string itself
+    const len = 1 + 3 + in.len;
+    const padding = makePadding(4, len);
 
-    return result;
+    // Always 254
+    out[0] = 254;
+
+    // The length of `in`, encoded as 3 bytes in little-endian order
+    std.mem.writeInt(u24, out[1..4], @intCast(in.len), .little);
+
+    @memcpy(out[4 .. 4 + in.len], in);
+
+    // Set the padding bytes to 0
+    @memset(out[len .. len + padding], 0);
+
+    return len + padding;
 }
 
+/// Returns the size of the TL encoded string once deserialized.
+/// Writes the length of the full serialized sequence into `read`
 pub fn strDeserializedSize(src: []const u8, read: *usize) usize {
-    var len: usize = src[0];
-    var lenn: usize = 0;
+    if (src[0] <= 253) {
+        // I guess most of the time we would have a shorter string
+        @branchHint(.likely);
 
-    if (len >= 254) {
-        read.* += 4;
-        lenn += 4;
-        var actualLen: [4]u8 = undefined;
+        const len_serialized = 1 + @as(u32, src[0]);
+        const padding = makePadding(4, len_serialized);
 
-        @memcpy((&actualLen)[0..3], src[1..4]);
-        actualLen[3] = 0;
-        len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
-    } else {
-        read.* += 1;
-        lenn += 1;
+        read.* += len_serialized + padding;
+
+        return src[0];
     }
 
-    read.* += len;
+    const len = std.mem.readInt(u24, src[1..4], .little);
 
-    lenn += len;
+    const len_serialized = 1 + 3 + @as(u32, len);
+    const padding = makePadding(4, len_serialized);
 
-    while (lenn % 4 != 0) {
-        read.* += 1;
-        lenn += 1;
-    }
+    read.* += len_serialized + padding;
 
     return len;
+}
+
+/// Deserializes a TL encoded string into a sequence of bytes
+///
+/// Returns 1. How many bytes were deserialized 2. How many bytes were read
+///
+/// You may check how many bytes are needed for the output with `strDeserializedSize`.
+pub fn deserializeString(noalias src: []const u8, noalias dest: []u8) struct { usize, usize } {
+    if (src[0] <= 253) {
+        // I guess most of the time we would have a shorter string
+        @branchHint(.likely);
+
+        const len_serialized = 1 + @as(u32, src[0]);
+        const padding = makePadding(4, len_serialized);
+
+        @memcpy(dest[0..src[0]], src[1..len_serialized]);
+
+        return .{ src[0], len_serialized + padding };
+    }
+
+    const len = std.mem.readInt(u24, src[1..4], .little);
+
+    const len_serialized = 1 + 3 + @as(u32, len);
+    const padding = makePadding(4, len_serialized);
+
+    @memcpy(dest[0..len], src[1 + 3 .. len_serialized]);
+
+    return .{ len, len_serialized + padding };
+}
+
+pub fn deserializeStringNoCopy(src: []const u8) []const u8 {
+    if (src[0] <= 253) {
+        // I guess most of the time we would have a shorter string
+        @branchHint(.likely);
+
+        const len_serialized = 1 + @as(u32, src[0]);
+        //const padding = makePadding(4, len_serialized);
+
+        return src[1..len_serialized];
+    }
+
+    const len = std.mem.readInt(u24, src[1..4], .little);
+
+    const len_serialized = 1 + 3 + @as(u32, len);
+    //const padding = makePadding(4, len_serialized);
+
+    return src[1 + 3 .. len_serialized];
 }
 
 pub fn serializeInt(in: anytype, out: []u8) usize {
@@ -443,8 +593,8 @@ pub fn serializeInt(in: anytype, out: []u8) usize {
             return @sizeOf(@TypeOf(in_ty));
         },
         usize => {
-            const bytes = std.mem.toBytes(std.mem.nativeToLittle(u32, @intCast(in)));
-            @memcpy(out[0..bytes.len], &bytes);
+            std.mem.writeInt(u32, @ptrCast(out[0..4]), @intCast(in), .little);
+
             return @sizeOf(u32);
         },
         else => {
@@ -486,43 +636,9 @@ pub fn bytesToSlice(in: []u8, size: usize, comptime T: type) struct { []T, usize
     //const {s}_vector = @constCast(@as(@TypeOf(result.{s}), @alignCast(std.mem.bytesAsSlice(base.unwrapType(@TypeOf(result.{s})), dest[written.* .. written.* + (len * @sizeOf(base.unwrapType(@TypeOf(result.{s}))))]))));
 }
 
-pub fn deserializeString(src: []const u8, dest: []u8) struct { usize, usize } {
-    var read: usize = 1;
-    var len: usize = src[0];
-    if (len >= 254) {
-        read += 3;
-        var actualLen: [4]u8 = undefined;
-
-        @memcpy((&actualLen)[0..3], src[1..4]);
-        actualLen[3] = 0;
-
-        len = std.mem.readInt(u32, &actualLen, std.builtin.Endian.little);
-        //dest.* = dest.*[0..len];
-        //@memcpy(@constCast(dest.*), src[4 .. 4 + len]);
-        @memcpy(dest[0..len], src[4 .. 4 + len]);
-    } else {
-        //dest.* = dest.*[0..len];
-        //@memcpy(@constCast(dest.*), src[1 .. 1 + len]);
-        @memcpy(dest[0..len], src[1 .. 1 + len]);
-    }
-    read += len;
-
-    while (read % 4 != 0) {
-        std.debug.assert(src[read] == 0);
-        read += 1;
-    }
-
-    return .{ len, read };
-}
-
 pub fn ensureAligned(in: usize, align_n: usize) usize {
-    var result: usize = 0;
-
-    while ((in + result) % align_n != 0) {
-        result += 1;
-    }
-
-    return result;
+    const remainder = in % align_n;
+    return if (remainder == 0) 0 else align_n - remainder;
 }
 
 test "serialize string" {
@@ -642,4 +758,21 @@ pub fn unwrapType(comptime T: type) type {
             return T;
         },
     }
+}
+
+pub fn TLInt(comptime TL: type, value: anytype) TL {
+    switch (@TypeOf(value)) {
+        u32, i32 => {
+            return TL{ .Int = @bitCast(value) };
+        },
+        u64, i64 => {
+            return TL{ .Long = @bitCast(value) };
+        },
+        else => @compileError("unsupported"),
+    }
+}
+
+pub fn shortTypeName(comptime T: type) []const u8 {
+    var iter = std.mem.splitBackwardsScalar(u8, @typeName(T), '.');
+    return iter.first();
 }
