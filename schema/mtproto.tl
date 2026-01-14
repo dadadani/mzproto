@@ -26,7 +26,7 @@ dh_gen_fail#a69dae02 nonce:int128 server_nonce:int128 new_nonce_hash3:int128 = S
 bind_auth_key_inner#75a3f765 nonce:long temp_auth_key_id:long perm_auth_key_id:long temp_session_id:long expires_at:int = BindAuthKeyInner;
 
 //rpc_result#f35c6d01 req_msg_id:long result:Object = RpcResult;
-rpc_error#2144ca19 error_code:int error_message:string = RpcError;
+//rpc_error#2144ca19 error_code:int error_message:string = RpcError;
 
 rpc_answer_unknown#5e2ad36e = RpcDropAnswer;
 rpc_answer_dropped_running#cd78e586 = RpcDropAnswer;

@@ -35,6 +35,22 @@ pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringA
             , .{ name, name });
         }
 
+        // toTL
+
+        try writer.print(
+            \\    pub fn toTL(self: *const {s}) TL {{
+            \\        @setEvalBranchQuota(1000000);
+            \\        switch (self.*) {{
+            \\            inline else => |x| {{
+            \\                return @unionInit(TL, base.shortTypeName(@TypeOf(x)), x);
+            \\            }},
+            \\        }}
+            \\    }}
+            \\
+        , .{box.key_ptr.*});
+
+        // END - toTl
+
         // deserializeSize
 
         try writer.print(
@@ -50,7 +66,7 @@ pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringA
 
             try writer.print(
                 \\            0x{x} => {{
-                \\                size.* = std.mem.alignForward(usize, size.*, @alignOf({s}));
+                \\                size.* += (@alignOf({s}) - 1);
                 \\                return 4 + {s}.deserializeSize(in[4..], size);
                 \\            }},
                 \\
@@ -161,7 +177,7 @@ pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringA
             \\        @setEvalBranchQuota(1000000);
             \\        switch (self.*) {{
             \\            inline else => |x| {{
-            \\                size.* = std.mem.alignForward(usize, size.*, @alignOf(@TypeOf(x)));
+            \\                size.* += (@alignOf(@TypeOf(x)) - 1);
             \\                x.cloneSize(size);
             \\            }},
             \\        }}
@@ -212,8 +228,12 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\pub const TL = union(enum) {{
         \\    ProtoMessageContainer: *const ProtoMessageContainer,
         \\    ProtoRPCResult: *const ProtoRPCResult,
-        \\    Vector: *const Vector,
+        \\    ProtoRpcError: *const ProtoRpcError,
+        \\    Vector: []const TL,
         \\    Int: u32,
+        \\    Bytes: []const u8,
+        \\    Double: f64,
+        \\    Bool: bool,
         \\    Long: u64,
         \\    ProtoFutureSalts: *const ProtoFutureSalts,
         \\
@@ -234,15 +254,19 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\        const id = std.mem.readInt(u32, @ptrCast(in[0..4]), std.builtin.Endian.little);
         \\        switch (id) {{
         \\            0x73F1F8DC => {{
-        \\                size.* = std.mem.alignForward(usize, size.*, @alignOf(ProtoMessageContainer));
+        \\                size.* += (@alignOf(ProtoMessageContainer) - 1);
         \\                return 4 + ProtoMessageContainer.deserializeSize(in[4..], size);  
         \\            }},
         \\            0xf35c6d01 => {{
-        \\                size.* = std.mem.alignForward(usize, size.*, @alignOf(ProtoRPCResult));
+        \\                size.* += (@alignOf(ProtoRPCResult) - 1);
         \\                return 4 + ProtoRPCResult.deserializeSize(in[4..], size);  
         \\            }},
+        \\            0x2144ca19 => {{
+        \\                size.* += (@alignOf(ProtoRpcError) - 1);
+        \\                return 4 + ProtoRpcError.deserializeSize(in[4..], size);  
+        \\            }},
         \\            0x1cb5c415 => {{
-        \\                size.* = std.mem.alignForward(usize, size.*, @alignOf(Vector));
+        \\                size.* += (@alignOf(Vector) - 1);
         \\                return 4 + Vector.deserializeSize(in[4..], size);  
         \\            }},
         \\
@@ -251,7 +275,7 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
     for (items.items) |item| {
         try writer.print(
             \\            0x{x} => {{
-            \\                size.* = std.mem.alignForward(usize, size.*, @alignOf({s}));
+            \\                size.* += (@alignOf({s}) - 1);
             \\                return 4 + {s}.deserializeSize(in[4..], size);
             \\            }},
             \\
@@ -280,11 +304,14 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\    pub fn serializeSize(self: *const TL) usize {{
         \\        @setEvalBranchQuota(1000000);
         \\        switch (self.*) {{
-        \\            .Int => {{
+        \\            .Int, .Bool => {{
         \\                return 4;
         \\            }},
-        \\            .Long => {{
+        \\            .Long, .Double => {{
         \\                return 8;
+        \\            }},
+        \\            .Bytes, .Vector => {{
+        \\                @panic("unsupported");
         \\            }},
         \\            inline else => |x| {{
         \\                return 4 + x.serializeSize();
@@ -310,6 +337,10 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                _ = base.serializeInt(x, out[0..8]);
         \\                return 8;
         \\            }},
+        \\            .Bool => |x| {{
+        \\                _ = base.serializeInt(if (x) @as(u32, 0x997275b5) else 0xbc799737, out[0..4]);
+        \\                return 4;
+        \\            }},
         \\            .ProtoMessageContainer => |x| {{
         \\                _ = base.serializeInt(@as(u32, 0x73F1F8DC), out[0..4]);
         \\                return 4 + x.serialize(out[4..]);
@@ -318,9 +349,12 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                _ = base.serializeInt(@as(u32, 0xf35c6d01), out[0..4]);
         \\                return 4 + x.serialize(out[4..]);
         \\            }},
-        \\            .Vector => |x| {{
-        \\                _ = base.serializeInt(@as(u32, 0x1cb5c415), out[0..4]);
+        \\            .ProtoRpcError => |x| {{
+        \\                _ = base.serializeInt(@as(u32, 0x2144ca19), out[0..4]);
         \\                return 4 + x.serialize(out[4..]);
+        \\            }},
+        \\            .Vector, .Bytes, .Double => {{
+        \\               unreachable;
         \\            }},
         \\            .ProtoFutureSalts => |x| {{
         \\                _ = base.serializeInt(@as(u32, 0xae500895), out[0..4]);
@@ -359,6 +393,9 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\            0xf35c6d01 => {{
         \\                return .ProtoRPCResult;
         \\            }},
+        \\            0x2144ca19 => {{
+        \\                return .ProtoRpcError;
+        \\            }},
         \\            0x1cb5c415 => {{
         \\                return .Vector;
         \\            }},
@@ -390,6 +427,92 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\
     , .{});
 
+    // deserializeResultSize
+
+    try writer.print(
+        \\    pub fn getDeserializeResultSize(self: *const TL) ?*const (fn (in: []const u8, size: *usize) usize) {{
+        \\        switch (self.*) {{
+        \\
+    , .{});
+
+    for (items.items) |item| {
+        if (item.is_function) {
+            if (item.use_param) |use_param| {
+                try writer.print(
+                    \\            .{s} => |x| {{
+                    \\                return x.{s}.getDeserializeResultSize();
+                    \\            }},
+                    \\
+                , .{ item.name, use_param });
+                continue;
+            }
+            try writer.print(
+                \\            .{s} => {{
+                \\                return {s}.deserializeResultSize;
+                \\            }},
+                \\
+            , .{ item.name, item.name });
+        }
+    }
+
+    try writer.print(
+        \\            else => {{
+        \\                return null;
+        \\            }},
+        \\        }}
+        \\
+    , .{});
+
+    try writer.print(
+        \\    }}
+        \\
+    , .{});
+
+    // END - deserializeResult
+
+    // deserializeResult
+
+    try writer.print(
+        \\    pub fn getDeserializeResult(self: *const TL) ?*const (fn (noalias in: []const u8, noalias out: []u8) struct {{TL, usize, usize}}) {{
+        \\        switch (self.*) {{
+        \\
+    , .{});
+
+    for (items.items) |item| {
+        if (item.is_function) {
+            if (item.use_param) |use_param| {
+                try writer.print(
+                    \\            .{s} => |x| {{
+                    \\                return x.{s}.getDeserializeResult();
+                    \\            }},
+                    \\
+                , .{ item.name, use_param });
+                continue;
+            }
+            try writer.print(
+                \\            .{s} => {{
+                \\                return {s}.deserializeResult;
+                \\            }},
+                \\
+            , .{ item.name, item.name });
+        }
+    }
+
+    try writer.print(
+        \\            else => {{
+        \\                return null;
+        \\            }},
+        \\        }}
+        \\
+    , .{});
+
+    try writer.print(
+        \\    }}
+        \\
+    , .{});
+
+    // END - deserializeResult
+
     // deserialize
 
     try writer.print(
@@ -407,10 +530,10 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                const d = ProtoRPCResult.deserialize(in[4..], @alignCast(out[alignment..]));
         \\                return .{{TL{{.ProtoRPCResult = d[0]}}, alignment+d[1], 4+d[2]}};
         \\            }},
-        \\            0x1cb5c415 => {{
-        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(Vector)));
-        \\                const d = Vector.deserialize(in[4..], @alignCast(out[alignment..]));
-        \\                return .{{TL{{.Vector = d[0]}}, alignment+d[1], 4+d[2]}};
+        \\            0x2144ca19 => {{
+        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(ProtoRPCResult)));
+        \\                const d = ProtoRpcError.deserialize(in[4..], @alignCast(out[alignment..]));
+        \\                return .{{TL{{.ProtoRpcError = d[0]}}, alignment+d[1], 4+d[2]}};
         \\            }},
         \\            0xae500895 => {{
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(ProtoMessageContainer)));
@@ -454,9 +577,19 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\        @setEvalBranchQuota(1000000);
         \\        switch (self.*) {{
         \\            .Int => {{}},
-        \\            .Long => {{}},
+        \\            .Long, .Double, .Bool => {{}},
+        \\            .Vector => |x| {{
+        \\                size.* += (@alignOf([]const TL) - 1);
+        \\                size.* += x.len * @sizeOf(TL);
+        \\                for (x) |item| {{
+        \\                    item.cloneSize(size);
+        \\                }}
+        \\            }},
+        \\            .Bytes => |x| {{
+        \\              size.* += x.len;
+        \\            }},
         \\            inline else => |x| {{
-        \\                size.* = std.mem.alignForward(usize, size.*, @alignOf(@TypeOf(x)));
+        \\                size.* += (@alignOf(@TypeOf(x)) - 1);
         \\                x.cloneSize(size);
         \\            }},
         \\        }}
@@ -477,6 +610,26 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\            .Long => |x| {{
         \\                return .{{TL{{.Long = x}}, 0}};
         \\            }},
+        \\            .Double => |x| {{
+        \\                return .{{TL{{.Double = x}}, 0}};
+        \\            }},
+        \\            .Bool => |x| {{
+        \\                return .{{TL{{.Bool = x}}, 0}};
+        \\            }},
+        \\            .Bytes => |x| {{
+        \\                @memcpy(out[0..x.len], x);
+        \\                return .{{TL{{.Bytes = out[0..x.len]}}, x.len}};
+        \\            }},
+        \\            .Vector => |x| {{
+        \\                var written: usize = base.ensureAligned(@intFromPtr(out[0..].ptr), @alignOf([]const TL));
+        \\                var vector = @as([]const TL, @alignCast(std.mem.bytesAsSlice(TL, out[written .. written + (@sizeOf(TL) * x.len)])));
+        \\                for (x, 0..) |_, i| {{
+        \\                    const cloned = x.clone(@alignCast(out[written..]));
+        \\                    vector[i] = cloned[0];
+        \\                    written += cloned[1];
+        \\                }}
+        \\                return .{{TL{{.Vector = vector}}, written}};
+        \\            }},
         \\            .ProtoMessageContainer => |x| {{
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
         \\                const cloned = x.clone(@alignCast(out[alignment..]));
@@ -491,6 +644,11 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
         \\                const cloned = x.clone(@alignCast(out[alignment..]));
         \\                return .{{TL{{.ProtoRPCResult = cloned[0]}}, alignment+cloned[1]}};
+        \\            }},
+        \\            .ProtoRpcError => |x| {{
+        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
+        \\                const cloned = x.clone(@alignCast(out[alignment..]));
+        \\                return .{{TL{{.ProtoRpcError = cloned[0]}}, alignment+cloned[1]}};
         \\            }},
         \\            .Vector => |x| {{
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
@@ -518,6 +676,8 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
     , .{});
 
     // END - clone
+
+    // getDeserializeResultSize()
 
     try writer.print(
         \\}};

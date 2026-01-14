@@ -82,7 +82,7 @@ pub fn generateConstructorCloneSize(allocator: std.mem.Allocator, constructor: c
                         selfUsed = true;
                         used = false;
                         try writer.print(
-                            \\        size.* = std.mem.alignForward(usize, size.*, @alignOf(base.unwrapType({s}))) + {s}.len * @sizeOf(base.unwrapType({s}));
+                            \\        size.* += (@alignOf(base.unwrapType({s})) - 1) + {s}.len * @sizeOf(base.unwrapType({s}));
                             \\          
                             \\        for ({s}) |i{s}_{d}| {{
                             \\

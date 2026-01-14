@@ -75,7 +75,9 @@ pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
             \\pub const ProtoMessage = base.ProtoMessage;
             \\pub const ProtoRPCResult = base.ProtoRPCResult();
             \\pub const Vector = base.Vector(TL);
-            \\pub const ProtoFutureSalts = base.ProtoFutureSalts(ProtoFutureSalt);
+            \\pub const ProtoFutureSalts = base.ProtoFutureSalts(TL, ProtoFutureSalt);
+            \\pub const ProtoRpcError = base.ProtoRpcError;
+            \\const IProtoFutureSalts = base.IProtoFutureSalts(TL, ProtoFutureSalt);
             \\
             \\
         , .{layer});
@@ -141,18 +143,37 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, io: std.Io, filename: []co
             const name = try normalizeName(allocator, def, mtproto);
             errdefer allocator.free(name);
 
-            try tl_union_list.append(allocator, .{ .name = name, .id = def.id });
+            var generic_reference: ?[]u8 = null;
+
+            errdefer {
+                if (generic_reference) |ge| {
+                    allocator.free(ge);
+                }
+            }
+
+            for (def.params.items) |param| {
+                if (param.type) |ty| {
+                    if (ty == .Normal and ty.Normal.type.generic_ref) {
+                        generic_reference = try allocator.dupe(u8, param.name);
+                    }
+                }
+            }
+
+            try tl_union_list.append(allocator, .{
+                .name = name,
+                .id = def.id,
+                .is_function = if (def.category == .Functions) true else false,
+                .use_param = generic_reference,
+            });
         }
 
         try generateDef(allocator, def, writer, mtproto);
     }
 }
 
-pub fn main() !void {
-    var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = allocator.deinit();
-
-    var io = std.Io.Threaded.init(allocator.allocator(), .{});
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
     defer io.deinit();
 
     const file = try std.Io.Dir.cwd().createFile(io.io(), "./src/lib/tl/api.zig", .{});
@@ -165,13 +186,16 @@ pub fn main() !void {
     var tl_union_list = std.ArrayList(TlUnionItem){};
     defer {
         for (tl_union_list.items) |item| {
-            allocator.allocator().free(item.name);
+            allocator.free(item.name);
+            if (item.use_param) |use_param| {
+                allocator.free(use_param);
+            }
         }
-        tl_union_list.deinit(allocator.allocator());
+        tl_union_list.deinit(allocator);
     }
 
-    try parseAndGenerateFile(allocator.allocator(), io.io(), "./schema/api.tl", &writer.interface, &tl_union_list, false);
-    try parseAndGenerateFile(allocator.allocator(), io.io(), "./schema/mtproto.tl", &writer.interface, &tl_union_list, true);
+    try parseAndGenerateFile(allocator, io.io(), "./schema/api.tl", &writer.interface, &tl_union_list, false);
+    try parseAndGenerateFile(allocator, io.io(), "./schema/mtproto.tl", &writer.interface, &tl_union_list, true);
 
     try unions.generateTLUnion(&tl_union_list, &writer.interface);
 }

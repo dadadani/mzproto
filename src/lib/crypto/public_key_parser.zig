@@ -29,7 +29,6 @@ fn genFingerprint(self: *const RSAPublicKey) u64 {
     var mod_start: usize = 0;
     while (mod_start < modulus_bytes.len and modulus_bytes[mod_start] == 0) : (mod_start += 1) {}
     const mod_slice = modulus_bytes[mod_start..];
-
     var tl_modulus_bytes: [512]u8 = undefined;
     const tl_modulus_bytes_size = serializeString(mod_slice, &tl_modulus_bytes);
 

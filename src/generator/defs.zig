@@ -45,6 +45,25 @@ pub fn generateDef(allocator: std.mem.Allocator, constructor: constructors.TLCon
         , .{ utils.safeStrParam(param.name), ty });
     }
 
+    if (constructor.category == .Functions) {
+
+        // skip constructors that have a generic reference (we can't determine it without knowing the sub constructor)
+        var generic_reference = false;
+
+        for (constructor.params.items) |param| {
+            if (param.type) |ty| {
+                if (ty == .Normal and ty.Normal.type.generic_ref) {
+                    generic_reference = true;
+                }
+            }
+        }
+
+        if (!generic_reference) {
+            try deserialize.generateConstructorResultDeserializeSize(allocator, constructor.type, file, mtproto);
+            try deserialize.generateConstructorResultDeserialize(allocator, constructor.type, file, mtproto);
+        }
+    }
+
     try deserialize.generateConstructorDeserializeSize(allocator, constructor, name, file, mtproto);
     try deserialize.generateConstructorDeserialize(allocator, constructor, name, file, mtproto);
 

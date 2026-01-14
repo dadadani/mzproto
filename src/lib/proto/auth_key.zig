@@ -41,6 +41,8 @@ pub const GeneratedAuthKey = struct {
 };
 
 fn defaultKeys() []const RSAPublicKey {
+
+    // Since the keys are already known, we can parse them at compile time. I love optimizations like these!!!!!!
     const keys = comptime blk: {
         const TELEGRAM_PUBLIC_KEYS = [_][]const u8{
             // testmode keys
@@ -78,6 +80,8 @@ fn defaultKeys() []const RSAPublicKey {
 
 fn getPublicKey(id: u64) ?struct { u2048, u64 } {
     const default_keys = comptime defaultKeys();
+
+    // TODO: Allow adding third party keys, might be useful for unofficial servers.
 
     for (default_keys) |key| {
         if (id == key.fingerprint) {
@@ -125,7 +129,9 @@ const AuthGen = struct {
     }
 
     fn reqPQ(self: *AuthGen) !utils.Deserialized {
-        self.nonce = std.crypto.random.int(u128);
+        //self.nonce = std.crypto.random.int(u128);
+
+        try std.Io.randomSecure(self.io, @ptrCast(&self.nonce));
         var data: [tl.TL.serializeSize(&tl.TL{ .ProtoReqPqMulti = &.{ .nonce = 0 } })]u8 = undefined;
         const toWrite = tl.TL.serialize(&.{ .ProtoReqPqMulti = &.{ .nonce = self.nonce } }, &data);
 
@@ -159,7 +165,6 @@ const AuthGen = struct {
 
         const len_body = std.mem.readInt(u32, buf[16..20], .little);
         var size: usize = 0;
-
         _ = tl.TL.deserializeSize(buf[20 .. 20 + len_body], &size);
         const dest = try self.allocator.alloc(u8, size);
         errdefer self.allocator.free(dest);
@@ -197,7 +202,7 @@ const AuthGen = struct {
                 return GenError.Security;
             }
 
-            self.new_nonce = std.crypto.random.int(u256);
+            try std.Io.randomSecure(self.io, @ptrCast(&self.new_nonce));
 
             //
 
@@ -218,7 +223,7 @@ const AuthGen = struct {
             const innerData = tl.TL{ .ProtoPQInnerDataDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
             var written = innerData.serialize(&sbuf);
 
-            const bytes = try rsaPad(sbuf[0..written], self.public_key.?[0], self.public_key.?[1]);
+            const bytes = try rsaPad(self.io, sbuf[0..written], self.public_key.?[0], self.public_key.?[1]);
 
             var req_dh: [500]u8 = undefined;
 
@@ -330,7 +335,7 @@ const AuthGen = struct {
 
         self.dhPrime = std.mem.readInt(u2048, dhInnerData.dh_prime[0..256], .big);
         self.gA = std.mem.readInt(u2048, dhInnerData.g_a[0..256], .big);
-        std.crypto.random.bytes(&self.b);
+        try std.Io.randomSecure(self.io, @ptrCast(&self.b));
 
         var m = try Modulus.fromPrimitive(u2048, self.dhPrime);
 
@@ -386,7 +391,7 @@ const AuthGen = struct {
 
         var written = dhClientInnerData.serialize(bufSer[20 .. 20 + serSize]);
 
-        std.crypto.random.bytes(bufSer[20 + written .. 20 + written + divisiblePadding]);
+        try std.Io.randomSecure(self.io, bufSer[20 + written .. 20 + written + divisiblePadding]);
         std.crypto.hash.Sha1.hash(bufSer[20 .. 20 + written], bufSer[0..20], .{});
 
         ige(bufSer, bufSer, &key, &iv, true);
@@ -477,19 +482,21 @@ inline fn rangeCheck(val: u2048, min: u2048, max: u2048) !void {
 }
 
 /// RSA_PAD is a version of RSA with a variant of OAEP+ padding
-fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
+fn rsaPad(io: std.Io, src: []const u8, m: u2048, e: u64) ![256]u8 {
     std.debug.assert(src.len <= 144);
 
     var result: [256]u8 = undefined;
 
     var temp_key: [32]u8 = undefined;
-    std.crypto.random.bytes(&temp_key);
+    try std.Io.randomSecure(io, @ptrCast(&temp_key));
+
     @memcpy(result[0..32], &temp_key);
 
     {
         const data_with_padding = result[32 .. 32 + 192];
         @memcpy(data_with_padding[0..src.len], src);
-        std.crypto.random.bytes(data_with_padding[src.len..192]);
+        try std.Io.randomSecure(io, data_with_padding[src.len..192]);
+
         std.crypto.hash.sha2.Sha256.hash(result[0 .. 32 + 192], result[224 .. 224 + 32], .{});
         std.mem.reverse(u8, data_with_padding);
     }
@@ -506,11 +513,11 @@ fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
         }
     }
 
-    const encrypted_int = std.mem.readInt(u2048, &result, .big);
+    const key_aes_encryped = std.mem.readInt(u2048, &result, .big);
 
     // If `key_aes_encryped` is greater than the RSA modulus, we need to restart from the beginning
-    if (encrypted_int > m) {
-        return rsaPad(src, m, e);
+    if (key_aes_encryped > m) {
+        return rsaPad(io, src, m, e);
     }
 
     const a = Modulus.fromPrimitive(u2048, m) catch {
@@ -521,7 +528,7 @@ fn rsaPad(src: []const u8, m: u2048, e: u64) ![256]u8 {
         return GenError.ModulusFailure;
     };
 
-    const c = Modulus.Fe.fromPrimitive(u2048, a, encrypted_int) catch {
+    const c = Modulus.Fe.fromPrimitive(u2048, a, key_aes_encryped) catch {
         return GenError.ModulusFailure;
     };
 
