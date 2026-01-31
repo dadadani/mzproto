@@ -1,17 +1,3 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
 const std = @import("std");
 const tl_tests = @import("lib/tl/api_tests.zig");
 const tl = @import("./lib/tl/api.zig");
@@ -31,8 +17,7 @@ pub fn generate_dev(init: std.process.Init) !void {
     //  std.debug.print("dealloc: {any}", .{ok});
     //  }
 
-    const allocator = init.arena.allocator();
-
+    const allocator = init.gpa;
     var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
     defer io.deinit();
 
@@ -48,7 +33,7 @@ pub fn generate_dev(init: std.process.Init) !void {
     var writer = stream.writer(io.io(), &bufWrite);
     var reader = stream.reader(io.io(), &bufRead);
 
-    var transport: Transport = try Transport.init(.Abridged, &writer.interface, &reader.interface);
+    var transport: Transport = try Transport.init(.TcpAbridged, &writer.interface, &reader.interface);
     //
     std.debug.print("starting gen\n", .{});
     const gen_key = try generate.generate(allocator, io.io(), &transport, 2, false, true);
@@ -60,7 +45,7 @@ pub fn generate_dev(init: std.process.Init) !void {
     writer = stream.writer(io.io(), &bufWrite);
     reader = stream.reader(io.io(), &bufRead);
 
-    transport = try .init(.Abridged, &writer.interface, &reader.interface);
+    transport = try .init(.TcpAbridged, &writer.interface, &reader.interface);
 
     var session = try Session.init(io.io(), allocator, gen_key.authKey, tl.ProtoFutureSalt{
         .salt = gen_key.first_salt,
@@ -69,20 +54,38 @@ pub fn generate_dev(init: std.process.Init) !void {
     }, 2, true, false, false);
 
     std.debug.print("starting worker\n", .{});
-    var worker = try io.io().concurrent(Session.worker, .{ &session, io.io(), &transport });
-    var worker_reader = try io.io().concurrent(Session.recvMessageTransport, .{ &session, io.io(), &transport });
+    var worker = try io.io().concurrent(Session.worker, .{ &session, io.io(), allocator, &transport });
+    var worker_reader = try io.io().concurrent(Session.recvMessageTransport, .{ &session, io.io(), allocator, &transport });
 
     std.debug.print("sending ping\n", .{});
-    const msg = try session.send(io.io(), tl.TL{ .ProtoPing = &tl.ProtoPing{ .ping_id = 43242 } });
+    const msg = try session.send(io.io(), allocator, tl.TL{ .InvokeWithLayer = &tl.InvokeWithLayer{ .layer = tl.LAYER_VERSION, .query = .{ .InitConnection = &tl.InitConnection{ .api_id = 525926, .app_version = "1.0.0-dev", .device_model = "Samsung J5", .lang_code = "en", .lang_pack = "", .system_lang_code = "en", .system_version = "Android 15", .query = tl.TL{ .HelpGetConfig = &.{} } } } } });
     defer allocator.free(msg.ptr);
-    std.debug.print("recv message: {any}\n", .{msg.data});
+
+    //  std.debug.print("recv message: {any}\n", .{msg.data});
+
+    if (msg.data == .ProtoRpcError) {
+        std.debug.print("error recv: {d}: {s}", .{ msg.data.ProtoRpcError.error_code, msg.data.ProtoRpcError.error_message });
+    }
 
     //try session.sendMessageTransport(&transport, io.io(), allocator.allocator(), tl.TL{ .ProtoPing = &tl.ProtoPing{ .ping_id = 43242 } });
     //  std.debug.print("sent ping\n", .{});
 
     // const message = try session.recvMessageTransport(&transport, allocator.allocator());
     // defer allocator.allocator().free(message.ptr);
-    // std.debug.print("recv message: {any}\n", .{message.data});
+    std.debug.print("recv message: {any}\n", .{msg.data});
     try worker.await(io.io());
     try worker_reader.await(io.io());
+    std.debug.print("main: end 1\n", .{});
+
+    var nigg = try io.io().concurrent(Session.send, .{ &session, io.io(), allocator, tl.TL{ .InvokeWithLayer = &tl.InvokeWithLayer{ .layer = tl.LAYER_VERSION, .query = .{ .InitConnection = &tl.InitConnection{ .api_id = 525926, .app_version = "1.0.0-dev", .device_model = "Samsung J5", .lang_code = "en", .lang_pack = "", .system_lang_code = "en", .system_version = "Android 15", .query = tl.TL{ .HelpGetConfig = &.{} } } } } } });
+    std.debug.print("main: end 2\n", .{});
+
+    //_ = test_test.cancel(io.io()) catch {};
+    session.destroyRequests(io.io());
+    std.debug.print("main: end 3\n", .{});
+
+    session.deinit(io.io(), allocator);
+    std.debug.print("main: end 4\n", .{});
+
+    _ = try nigg.await(io.io());
 }

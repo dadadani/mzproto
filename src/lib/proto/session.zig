@@ -1,17 +1,3 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
 const tl = @import("../tl/api.zig");
 const std = @import("std");
 const Transport = @import("../transport.zig").Transport;
@@ -62,13 +48,12 @@ const Session = @This();
 
 const PendingRequest = struct {
     event: std.Io.Event = .unset,
-    data: union(enum) { none: struct {}, data: []u8, rpc_error: struct { *tl.ProtoRpcError, []u8 } } = .{ .none = .{} },
+    proto_req_id: ?u64 = null,
+    deserializeResultSize: *const (fn (in: []const u8, size: *usize) usize),
+    deserializeResult: *const (fn (noalias in: []const u8, noalias out: []u8) struct { tl.TL, usize, usize }),
+    data: ?utils.Deserialized,
+    // data: union(enum) { none: struct {}, data: []u8, rpc_error: struct { *tl.ProtoRpcError, []u8 } } = .{ .none = .{} },
 };
-
-dc_id: u8,
-is_media: bool,
-is_test_mode: bool,
-is_cdn: bool,
 
 seq_no: usize,
 
@@ -77,44 +62,27 @@ salts: std.ArrayList(tl.ProtoFutureSalt),
 pending_ack: std.ArrayList(u64),
 
 //salt: tl.ProtoFutureSalt,
-auth_key: [256]u8,
-auth_key_id: [8]u8,
 session_id: u64,
 message_id: MessageID,
-arena: std.heap.ArenaAllocator,
 pending_requests_idmap: std.AutoArrayHashMapUnmanaged(u64, u32),
 pending_requests: struct {
     map: std.AutoArrayHashMapUnmanaged(u32, PendingRequest),
-    mutex: std.Io.Mutex,
 
-    pub fn create(self: *@This(), io: std.Io, allocator: std.mem.Allocator, id: u32) !*PendingRequest {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-
+    /// The mutex is assumed to be already acquired.
+    pub fn create(self: *@This(), allocator: std.mem.Allocator, id: u32) !*PendingRequest {
         const req = try self.map.getOrPut(allocator, id);
         if (req.found_existing)
             return req.value_ptr;
 
-        req.value_ptr.* = .{};
+        req.value_ptr.* = .{ .deserializeResult = undefined, .deserializeResultSize = undefined, .data = null };
         return req.value_ptr;
     }
-
-    pub fn destroyItem(self: *@This(), allocator: std.mem.Allocator, io: std.Io, id: u32) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        if (self.map.get(id)) |req| {
-            switch (req.data) {
-                .data => |data| {
-                    allocator.free(data);
-                },
-                else => {},
-            }
-        }
-
-        _ = self.map.swapRemove(id);
-    }
 },
+
+// Unless noted, for every field in this struct, we need to acquire the mutex first before using them
+mutex: std.Io.Mutex,
+
+// Thread-safe
 requests_queue: std.Io.Queue(struct {
     id: u32,
     data: []u8,
@@ -122,6 +90,17 @@ requests_queue: std.Io.Queue(struct {
     content_related: bool,
 }),
 current_id: std.atomic.Value(u32) = .init(0),
+shutdown: std.atomic.Value(bool) = .init(false),
+waiting_requests: std.atomic.Value(u32) = .init(0),
+shutdown_event: std.Io.Event = .unset,
+
+// Not specifically thread-safe, but they will not change for the entire lifecycle of the session
+dc_id: u8,
+is_media: bool,
+is_test_mode: bool,
+is_cdn: bool,
+auth_key: [256]u8,
+auth_key_id: [8]u8,
 
 pub const EncryptionError = error{
     AuthKeyMismatch,
@@ -136,10 +115,12 @@ pub const SessionError = error{
     UnknownIncomingMessage,
 };
 
-pub const SendError = error{ NotFunction, Unknown };
+pub const SendError = error{ NotFunction, Unknown, Shutdown };
 
 /// Generates the next sequence number for a message.
 /// Returns the seqno to use and updates the internal counter if content-related.
+///
+/// The mutex is assumed to be already acquired.
 fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
     // The seqno of a content-related message is msg.seqNo = (current_seqno*2)+1
     // (and after generating it, the local current_seqno counter must be incremented by 1),
@@ -153,34 +134,22 @@ fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
     return seqno;
 }
 
-pub fn sendMessageTransport(self: *Session, transport: *Transport, io: std.Io, allocator: std.mem.Allocator, obj: tl.TL) !void {
-    self.seq_no = self.nextSeqNo(isContentRelated(obj));
-
-    const ser = try allocator.alloc(u8, obj.serializeSize());
-    defer allocator.free(ser);
-
-    const ser_len = obj.serialize(ser);
-
-    const encrypted = try self.encryptMessage(allocator, ser[0..ser_len], self.seq_no, try self.message_id.get(io));
-    defer allocator.free(encrypted);
-
-    try transport.write(encrypted);
-}
-
 fn handleMsgsAck(self: *Session, message: tl.ProtoMessage) !void {
     _ = self;
     _ = message;
 }
 
-fn handleBadNotification(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
+fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
     var size: usize = 0;
     _ = tl.IProtoBadMsgNotification.deserializeSize(message.body, &size);
-    const allocator = self.arena.allocator();
 
     const buf = try allocator.alloc(u8, size);
     defer allocator.free(buf);
 
     const bad_msg, _, _ = tl.IProtoBadMsgNotification.deserialize(message.body, buf);
+
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
 
     switch (bad_msg) {
         .ProtoBadServerSalt => |x| {
@@ -221,18 +190,18 @@ fn handleBadNotification(self: *Session, io: std.Io, message: tl.ProtoMessage) !
     }
 }
 
-fn handleRPCResult(self: *Session, io: std.Io, rpc_result: tl.ProtoRPCResult) !void {
-    // TODO: change, we shouldn't delete the element from the hashmap immediately
-    const req_id = self.pending_requests_idmap.fetchSwapRemove(rpc_result.req_msg_id) orelse {
-        // TODO: do something?
-        return;
-    };
+fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.ProtoRPCResult) !void {
 
     const req = blk: {
-        try self.pending_requests.mutex.lock(io);
-        defer self.pending_requests.mutex.unlock(io);
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-        const req = self.pending_requests.map.getPtr(req_id.value) orelse {
+        const req_id = self.pending_requests_idmap.get(rpc_result.req_msg_id) orelse {
+            // TODO: do something?
+            return;
+        };
+
+        const req = self.pending_requests.map.getPtr(req_id) orelse {
             // TODO: do something?
             return;
         };
@@ -244,47 +213,82 @@ fn handleRPCResult(self: *Session, io: std.Io, rpc_result: tl.ProtoRPCResult) !v
     if (tl.TL.identify(id)) |ty| {
         switch (ty) {
             .ProtoRpcError => {
+
                 var size: usize = 0;
                 _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
 
-                const buf = try self.arena.allocator().alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
-                errdefer self.arena.allocator().free(buf);
+                const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
+                errdefer allocator.free(buf);
 
                 const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
 
                 req.data = .{
-                    .rpc_error = .{ err, buf },
+                    .ptr = buf,
+                    .data = tl.TL{ .ProtoRpcError = err },
                 };
+
                 req.event.set(io);
             },
             .ProtoGzipPacked => {
+
                 const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
                 var reader = std.Io.Reader.fixed(gzip);
 
                 var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
 
-                const decompressed = try decompress.reader.allocRemaining(self.arena.allocator(), .unlimited);
+                const decompressed = try decompress.reader.allocRemaining(allocator, .unlimited);
+                defer allocator.free(decompressed);
 
-                req.data = .{ .data = decompressed };
+                var size_deserialize: usize = 0;
+                _ = req.deserializeResultSize(decompressed, &size_deserialize);
+
+                const buf = try allocator.alloc(u8, size_deserialize);
+                errdefer allocator.free(buf);
+
+                const deserialized, _, _ = req.deserializeResult(decompressed, buf);
+
+                req.data = .{ .data = deserialized, .ptr = buf };
+                req.event.set(io);
             },
             else => {
-                const data = try self.arena.allocator().dupe(u8, rpc_result.body);
+                var size_deserialize: usize = 0;
+                _ = req.deserializeResultSize(rpc_result.body, &size_deserialize);
 
-                req.data = .{ .data = data };
+                const buf = try allocator.alloc(u8, size_deserialize);
+                errdefer allocator.free(buf);
+
+                const deserialized, _, _ = req.deserializeResult(rpc_result.body, buf);
+
+                req.data = .{ .data = deserialized, .ptr = buf };
                 req.event.set(io);
             },
         }
+    } else {
+        // Although this shouldn't happen for pretty much all of the registered functions (at the time of writing), an rpc_result may pass an object that is still valid (eg. bare constructors)
+        var size_deserialize: usize = 0;
+        _ = req.deserializeResultSize(rpc_result.body, &size_deserialize);
+
+        const buf = try allocator.alloc(u8, size_deserialize);
+        errdefer allocator.free(buf);
+
+        const deserialized, _, _ = req.deserializeResult(rpc_result.body, buf);
+
+        req.data = .{ .data = deserialized, .ptr = buf };
+        req.event.set(io);
     }
 }
 
-fn handleNewDetailedInfo(self: *Session, message: tl.ProtoMessage) !void {
+fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
     var buf: [@sizeOf(tl.ProtoMsgDetailedInfo)]u8 align(@alignOf(tl.ProtoMsgDetailedInfo)) = undefined;
 
     const msg_detailed, _, _ = tl.IProtoMsgDetailedInfo.deserialize(message.body, &buf);
 
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
     switch (msg_detailed) {
-        .ProtoMsgDetailedInfo => |detailed_info| try self.pending_ack.append(self.arena.allocator(), detailed_info.answer_msg_id),
-        .ProtoMsgNewDetailedInfo => |new_detailed_info| try self.pending_ack.append(self.arena.allocator(), new_detailed_info.answer_msg_id),
+        .ProtoMsgDetailedInfo => |detailed_info| try self.pending_ack.append(allocator, detailed_info.answer_msg_id),
+        .ProtoMsgNewDetailedInfo => |new_detailed_info| try self.pending_ack.append(allocator, new_detailed_info.answer_msg_id),
     }
 }
 
@@ -295,75 +299,79 @@ fn handleFutureSalts(_: *Session, _: tl.ProtoMessage) !void {
 
 }
 
-fn handlePong(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
-    var buf: [@sizeOf(tl.ProtoPong)]u8 align(@alignOf(tl.ProtoPong)) = undefined;
+fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
+    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoPong), @sizeOf(tl.ProtoPong));
 
-    const pong, _, _ = tl.ProtoPong.deserialize(message.body[4..], &buf);
-
-    const req_id = self.pending_requests_idmap.fetchSwapRemove(pong.msg_id) orelse {
-        // TODO: do something?
-        return;
-    };
+    const pong, _, _ = tl.ProtoPong.deserialize(message.body[4..], buf);
 
     const req = blk: {
-        try self.pending_requests.mutex.lock(io);
-        defer self.pending_requests.mutex.unlock(io);
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-        const req = self.pending_requests.map.getPtr(req_id.value) orelse {
+        const req_id = self.pending_requests_idmap.get(pong.msg_id) orelse {
             // TODO: do something?
+
+            allocator.free(buf);
+            return;
+        };
+
+        const req = self.pending_requests.map.getPtr(req_id) orelse {
+            // TODO: do something?
+
+            allocator.free(buf);
             return;
         };
 
         break :blk req;
     };
 
-    const msg = try self.arena.allocator().dupe(u8, message.body);
-
-    req.data = .{ .data = msg };
+    req.data = .{ .data = .{ .ProtoPong = pong }, .ptr = buf };
     req.event.set(io);
 }
 
-fn handleMessageContainer(self: *Session, io: std.Io, message: tl.ProtoMessage) anyerror!void {
-    const container = try tl.ProtoMessageContainer.deserializeContainer(self.arena.allocator(), message.body[4..]);
-    defer self.arena.allocator().free(container);
+fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) anyerror!void {
+    const container = try tl.ProtoMessageContainer.deserializeContainer(allocator, message.body[4..]);
+    defer allocator.free(container);
 
     for (container) |msg| {
-        try self.processMessage(io, msg);
+        try self.processMessage(io, allocator, msg);
     }
 }
 
-fn handleGZipPacked(self: *Session, io: std.Io, message: tl.ProtoMessage) anyerror!void {
+fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) anyerror!void {
     const gzip = deserializeStringNoCopy(message.body[4..]);
     var reader = std.Io.Reader.fixed(gzip);
 
     var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
 
-    const decompressed = try decompress.reader.allocRemaining(self.arena.allocator(), .unlimited);
-    defer self.arena.allocator().free(decompressed);
+    const decompressed = try decompress.reader.allocRemaining(allocator, .unlimited);
+    defer allocator.free(decompressed);
 
-    try self.processMessage(io, .{
+    try self.processMessage(io, allocator, .{
         .seqno = message.seqno,
         .msg_id = message.msg_id,
         .body = decompressed,
     });
 }
 
-fn processMessage(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
+fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
     //const allocator = self.arena.allocator();
 
     const id = std.mem.readInt(u32, message.body[0..4], .little);
+    //std.debug.print("received {any}\n", .{tl.TL.identify(id)});
+
     if (tl.TL.identify(id)) |ty| {
         switch (ty) {
-            .ProtoRPCResult => try self.handleRPCResult(io, tl.ProtoRPCResult.deserializeNoCopy(message.body)),
+            .ProtoRPCResult => try self.handleRPCResult(io, allocator, tl.ProtoRPCResult.deserializeNoCopy(message.body[4..])),
             .ProtoMsgsAck => try self.handleMsgsAck(message),
-            .ProtoBadMsgNotification, .ProtoBadServerSalt => try self.handleBadNotification(io, message),
-            .ProtoMsgDetailedInfo, .ProtoMsgNewDetailedInfo => try self.handleNewDetailedInfo(message),
+            .ProtoBadMsgNotification, .ProtoBadServerSalt => try self.handleBadNotification(io, allocator, message),
+            .ProtoMsgDetailedInfo, .ProtoMsgNewDetailedInfo => try self.handleNewDetailedInfo(io, allocator, message),
             .ProtoFutureSalt => try self.handleFutureSalts(message),
-            .ProtoPong => try self.handlePong(io, message),
-            .ProtoMessageContainer => try self.handleMessageContainer(io, message),
-            .ProtoGzipPacked => try self.handleGZipPacked(io, message),
+            .ProtoPong => try self.handlePong(io, allocator, message),
+            .ProtoMessageContainer => try self.handleMessageContainer(io, allocator, message),
+            .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
             else => {
-                std.debug.print("got {any} to handle\n", .{ty});
+                // std.debug.print("got {any} to handle\n", .{ty});
             },
         }
     } else {
@@ -371,34 +379,35 @@ fn processMessage(self: *Session, io: std.Io, message: tl.ProtoMessage) !void {
     }
 }
 
-pub fn recvMessageTransport(self: *Session, io: std.Io, transport: *Transport) !void {
-    const len = try transport.recvLen();
-    const allocator = self.arena.allocator();
+pub fn recvMessageTransport(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
+    for (0..2) |_| {
+        const len = try transport.recvLen(io);
 
-    const buf = try allocator.alloc(u8, len);
-    defer allocator.free(buf);
+        const buf = try allocator.alloc(u8, len);
+        defer allocator.free(buf);
 
-    if (buf.len == 4) {
-        const code = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
-        if (code == 404) {
-            return SessionError.Transport404;
+        if (buf.len == 4) {
+            const code = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
+            if (code == 404) {
+                return SessionError.Transport404;
+            }
+            return SessionError.TransportUnknown;
         }
-        return SessionError.TransportUnknown;
+
+        _ = try transport.recv(io, buf);
+
+        try self.decryptMessage(io, buf);
+
+        const message_bytes = buf[8 + 16 + 8 + 8 ..];
+
+        const message = tl.ProtoMessage.deserializeNoCopy(message_bytes);
+
+        try self.processMessage(io, allocator, message);
     }
-
-    _ = try transport.recv(buf);
-
-    try self.decryptMessage(buf);
-
-    const message_bytes = buf[8 + 16 + 8 + 8 ..];
-    
-    const message = tl.ProtoMessage.deserializeNoCopy(message_bytes);
-
-    return self.processMessage(io, message);
 }
 
 /// Decrypts an encrypted message in-place.
-fn decryptMessage(self: *const Session, data: []u8) !void {
+fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
     const auth_key_id = data[0..8];
     if (!std.mem.eql(u8, &self.auth_key_id, auth_key_id)) {
         return EncryptionError.AuthKeyMismatch;
@@ -444,6 +453,9 @@ fn decryptMessage(self: *const Session, data: []u8) !void {
     //const salt = std.mem.readInt(u64, plaintext[0..8], .little); TODO: can we do something with it?
     const session_id = std.mem.readInt(u64, plaintext[8 .. 8 + 8], .little);
 
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
     if (session_id != self.session_id) {
         return EncryptionError.SessionIdMismatch;
     }
@@ -456,34 +468,68 @@ fn determineMessagePadding(len: usize) usize {
     return if (remainder == 0) 12 else 12 + (16 - remainder);
 }
 
-pub fn worker(self: *Session, io: std.Io, transport: *Transport) !void {
+pub fn worker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
     const req = try self.requests_queue.getOne(io);
-    defer self.arena.allocator().free(req.data);
 
-    const seqno = self.nextSeqNo(req.content_related);
+    defer allocator.free(req.data);
 
-    const msgid = try self.message_id.get(io);
+    errdefer {
+        self.mutex.lockUncancelable(io);
+        if (self.pending_requests.map.getPtr(req.id)) |pending_req| {
+            pending_req.event.set(io);
+        }
+        self.mutex.unlock(io);
+    }
 
-    try self.encryptMessage(io, req.data, seqno, msgid, req.data_len);
+    const msgid = blk: {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-    try self.pending_requests_idmap.put(
-        self.arena.allocator(),
-        msgid,
-        req.id,
-    );
+        if (self.shutdown.load(.acquire)) {
+            return;
+        }
 
-    return transport.write(req.data);
+        const seqno = self.nextSeqNo(req.content_related);
+
+        const msgid = try self.message_id.get(io);
+
+        try self.encryptMessage(io, req.data, seqno, msgid, req.data_len);
+
+        try self.pending_requests_idmap.put(
+            allocator,
+            msgid,
+            req.id,
+        );
+
+        self.pending_requests.map.getPtr(req.id).?.proto_req_id = msgid;
+
+        break :blk msgid;
+    };
+
+    errdefer {
+        self.mutex.lockUncancelable(io);
+        _ = self.pending_requests_idmap.swapRemove(msgid);
+        self.mutex.unlock(io);
+    }
+
+    try transport.write(io, req.data);
 }
 
-pub fn send(self: *Session, io: std.Io, message: tl.TL) !utils.Deserialized {
+/// Enqueues a new TL function into the reader worker queue, and waits for the result.
+///
+/// Cancellation is supported for this function, but only to cancel the waiter itself (If the request has already been added to the queue, it will be sent to Telegram anyway).
+pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.TL) !utils.Deserialized {
     const deserializeResultSize = message.getDeserializeResultSize() orelse return SendError.NotFunction;
     const deserializeResult = message.getDeserializeResult() orelse return SendError.NotFunction;
+    if (self.shutdown.load(.acquire)) {
+        return SendError.Shutdown;
+    }
 
     const len_serialized = message.serializeSize();
 
     // To avoid re-allocating again once we need to encrypt the message, we determine the full length in advance
     const offset_auth_key_id = 0;
-    const offset_msg_key = offset_auth_key_id + 8; 
+    const offset_msg_key = offset_auth_key_id + 8;
     const offset_salt = offset_msg_key + 16;
     const offset_session_id = offset_salt + 8;
     const offset_message_id = offset_session_id + 8;
@@ -495,68 +541,68 @@ pub fn send(self: *Session, io: std.Io, message: tl.TL) !utils.Deserialized {
 
     const id = self.current_id.fetchAdd(1, .seq_cst);
 
-    const buf = try self.arena.allocator().alloc(u8, offset_end);
-    // TODO: handle deallocation correctly. the buffer might get deallocated while the worker is reading it
-    defer self.arena.allocator().free(buf);
+    const buf = try allocator.alloc(u8, offset_end);
 
     _ = message.serialize(buf[offset_data..offset_padding]);
 
-    const req = try self.pending_requests.create(io, self.arena.allocator(), id);
-    defer self.pending_requests.destroyItem(self.arena.allocator(), io, id);
+    const req = brk: {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-    try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message), .data_len = len_serialized });
+        const req = try self.pending_requests.create(allocator, id);
 
-    // TODO: handle cancellation correctly
-    try req.event.wait(io);
+        req.deserializeResult = deserializeResult;
+        req.deserializeResultSize = deserializeResultSize;
 
-    switch (req.data) {
-        .none => {
-            return SendError.Unknown;
-        },
-        .data => |data| {
-            var size: usize = 0;
+        break :brk req;
+    };
 
-            _ = deserializeResultSize(data, &size);
+    defer {
+        self.mutex.lockUncancelable(io);
+        if (req.proto_req_id) |proto_req_id| {
+            _ = self.pending_requests_idmap.swapRemove(proto_req_id);
+        }
+        _ = self.pending_requests.map.swapRemove(id);
+        self.mutex.unlock(io);
+    }
+    self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message), .data_len = len_serialized }) catch |e| {
+        allocator.free(buf);
+        return e;
+    };
 
-            const buf_res = try self.arena.allocator().alloc(u8, size);
-            errdefer self.arena.allocator().free(buf_res);
+    {
+        _ = self.waiting_requests.fetchAdd(1, .seq_cst);
+        defer {
+            const sub = self.waiting_requests.fetchSub(1, .seq_cst);
+            if (sub == 1) {
+                self.shutdown_event.set(io);
+            }
+        }
 
-            const res, _, _ = deserializeResult(data, buf_res);
+        try req.event.wait(io);
+    }
 
-            return .{ .data = res, .ptr = buf_res };
-        },
-        .rpc_error => |err| {
-            return .{
-                .data = tl.TL{ .ProtoRpcError = err[0] },
-                .ptr = err[1],
-            };
-        },
+    if (req.data) |data| {
+        return data;
+    } else {
+        return SendError.Unknown;
     }
 }
 
 /// Encrypts raw bytes in-place into a message to be sent directly to Telegram's servers.
+/// The mutex is assumed to be already acquired.
 fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, message_id: u64, message_len: usize) !void {
-    const len_headers = @sizeOf(u64) + //auth_key_id
-        @sizeOf(u128); //msg_key
-
-    var len_encrypted =
-        @sizeOf(u64) + //salt
-        @sizeOf(u64) + //session_id
-        @sizeOf(u64) + //message_id
-        @sizeOf(u32) + //seq_no
-        @sizeOf(u32) + //message_data_len
-        message_len;
-
-    const padding = determineMessagePadding(len_encrypted);
-    len_encrypted += padding;
-
-    const offset_salt = len_headers;
+    const offset_auth_key_id = 0;
+    const offset_msg_key = offset_auth_key_id + 8;
+    const offset_salt = offset_msg_key + 16;
     const offset_session_id = offset_salt + 8;
     const offset_message_id = offset_session_id + 8;
     const offset_seqno = offset_message_id + 8;
     const offset_len_data = offset_seqno + 4;
     const offset_data = offset_len_data + 4;
     const offset_padding = offset_data + message_len;
+
+    const padding = determineMessagePadding(offset_padding - offset_salt);
 
     // write data to encrypt
     std.mem.writeInt(u64, data[offset_salt..][0..8], self.salts.items[0].salt, .little);
@@ -567,13 +613,13 @@ fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, me
     try std.Io.randomSecure(io, data[offset_padding .. offset_padding + padding]);
 
     // Write auth_key_id
-    @memcpy(data[0..8], &self.auth_key_id);
+    @memcpy(data[offset_auth_key_id..offset_msg_key], &self.auth_key_id);
 
     // create message_key
-    const message_key = data[8 .. 8 + 16];
+    const message_key = data[offset_msg_key..offset_salt];
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     digest.update(self.auth_key[88..120]);
-    digest.update(data[len_headers .. len_headers + len_encrypted]);
+    digest.update(data[offset_salt .. offset_padding + padding]);
     @memcpy(data[8 .. 8 + 16], digest.finalResult()[8..24]);
 
     var a: [32]u8 = undefined;
@@ -598,11 +644,55 @@ fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, me
     @memcpy(iv[8 .. 8 + 16], a[8..24]);
     @memcpy(iv[8 + 16 .. 8 + 16 + 8], b[24..32]);
 
-    ige(data[len_headers .. len_headers + len_encrypted], data[len_headers .. len_headers + len_encrypted], &key, &iv, true);
+    ige(data[offset_salt .. offset_padding + padding], data[offset_salt .. offset_padding + padding], &key, &iv, true);
 }
 
-pub fn deinit(self: *Session) !void {
-    self.arena.deinit();
+/// Signals all pending requests and prevents new ones.
+///
+/// This does not deinit the map because callers might still be waiting on `req.event`.
+/// Call `deinit` after all waiters have returned.
+pub fn destroyRequests(self: *Session, io: std.Io) void {
+    self.mutex.lockUncancelable(io);
+    self.shutdown.store(true, .release);
+
+    var it = self.pending_requests.map.iterator();
+    while (it.next()) |pending_req| {
+        pending_req.value_ptr.event.set(io);
+    }
+    if (self.waiting_requests.load(.acquire) == 0) {
+        self.shutdown_event.set(io);
+    }
+    self.mutex.unlock(io);
+
+    self.shutdown_event.waitUncancelable(io);
+}
+
+/// Before calling this function, make sure no worker is running and to have deleted every event in `pending_requests` (use `destroyRequests` for that)
+pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
+    self.mutex.lockUncancelable(io);
+    // keep the mutex always locked, since this session shouldn't be used ever again
+    while (true) {
+        if (self.requests_queue.capacity() == 0) {
+            break;
+        }
+        const req = self.requests_queue.getOneUncancelable(io) catch {
+            break;
+        };
+        allocator.free(req.data);
+    }
+    self.requests_queue.close(io);
+    self.salts.deinit(allocator);
+    self.pending_ack.deinit(allocator);
+    self.pending_requests_idmap.deinit(allocator);
+
+    var it = self.pending_requests.map.iterator();
+    while (it.next()) |pending_req| {
+        if (pending_req.value_ptr.data) |data| {
+            pending_req.value_ptr.data = null;
+            allocator.free(data.ptr);
+        }
+    }
+    self.pending_requests.map.deinit(allocator);
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, test_mode: bool, is_cdn: bool, is_media: bool) !Session {
@@ -617,10 +707,15 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: t
         .auth_key = auth_key,
         .session_id = undefined,
         .auth_key_id = undefined,
-        .arena = std.heap.ArenaAllocator.init(allocator),
         .pending_ack = .{},
-        .pending_requests = .{ .map = .{}, .mutex = .init },
+        .pending_requests = .{
+            .map = .{},
+        },
         .current_id = .init(0),
+        .shutdown = .init(false),
+        .waiting_requests = .init(0),
+        .shutdown_event = .unset,
+        .mutex = .init,
         .pending_requests_idmap = .{},
         .requests_queue = .init(&.{}),
     };
@@ -637,7 +732,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: t
     // We use this one as the "best guess", if we receive a bad_msg_notification, then we synchronize it with the expected time
     try self.message_id.updateTime(io, @intCast((try std.Io.Clock.now(.real, io)).toSeconds()));
 
-    try self.salts.append(self.arena.allocator(), salt);
+    try self.salts.append(allocator, salt);
 
     return self;
 }

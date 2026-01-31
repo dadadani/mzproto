@@ -1,57 +1,47 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
-const Abridged = @import("transport/abridged.zig");
+const TcpAbridged = @import("transport/tcp_abridged.zig");
 
 const std = @import("std");
 
 pub const Error = error{ LengthNotRead, LengthAlreadyConsumed };
 
-pub const Transports = std.meta.Tag(Transport);
+pub const Transports = std.meta.Tag(TransportUnion);
 
-pub const Transport = union(enum) {
-    Abridged: Abridged,
+const TransportUnion = union(enum) {
+    TcpAbridged: TcpAbridged,
+};
+
+pub const Transport = struct {
+    transport: TransportUnion,
 
     pub fn init(transport_mode: Transports, writer: *std.Io.Writer, reader: *std.Io.Reader) !Transport {
         switch (transport_mode) {
-            .Abridged => {
-                return .{ .Abridged = try Abridged.init(writer, reader) };
+            .TcpAbridged => {
+                return .{ .transport = .{ .TcpAbridged = try TcpAbridged.init(writer, reader) } };
             },
         }
     }
 
-    pub fn recvLen(self: *Transport) !usize {
-        return switch (self.*) {
-            .Abridged => self.Abridged.recvLen(),
+    pub fn recvLen(self: *Transport, io: std.Io) !usize {
+        return switch (self.transport) {
+            inline else => |*x| x.recvLen(io),
         };
     }
 
-    pub fn recv(self: *Transport, buf: []u8) !usize {
-        return switch (self.*) {
-            .Abridged => self.Abridged.recv(buf),
+    pub fn recv(self: *Transport, io: std.Io, buf: []u8) !usize {
+        return switch (self.transport) {
+            inline else => |*x| x.recv(io, buf),
         };
     }
 
-    pub fn write(self: *Transport, buf: []const u8) !void {
-        return switch (self.*) {
-            .Abridged => self.Abridged.write(buf),
+    pub fn write(self: *Transport, io: std.Io, buf: []const u8) !void {
+        return switch (self.transport) {
+            inline else => |*x| x.write(io, buf),
         };
     }
 
-    pub fn writeVec(self: *Transport, buf: []const []const u8) !void {
-        return switch (self.*) {
-            .Abridged => self.Abridged.writeVec(buf),
+    pub fn writeVec(self: *Transport, io: std.Io, buf: []const []const u8) !void {
+        return switch (self.transport) {
+            inline else => |*x| x.writeVec(io, buf),
         };
     }
 };

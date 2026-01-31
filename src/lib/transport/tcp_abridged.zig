@@ -1,17 +1,3 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
 const std = @import("std");
 const Error = @import("../transport.zig").Error;
 
@@ -25,6 +11,9 @@ reader: *std.Io.Reader,
 mode: Mode = .SingleByte,
 len: usize = 0,
 
+mutex_read: std.Io.Mutex = .init,
+mutex_write: std.Io.Mutex = .init,
+
 pub fn init(writer: *std.Io.Writer, reader: *std.Io.Reader) !Abridged {
     var self = Abridged{
         .reader = reader,
@@ -35,7 +24,10 @@ pub fn init(writer: *std.Io.Writer, reader: *std.Io.Reader) !Abridged {
     return self;
 }
 
-pub fn recvLen(self: *Abridged) !usize {
+pub fn recvLen(self: *Abridged, io: std.Io) !usize {
+    try self.mutex_read.lock(io);
+    defer self.mutex_read.unlock(io);
+
     switch (self.mode) {
         .SingleByte => {
             var lenB: [1]u8 = undefined;
@@ -43,26 +35,29 @@ pub fn recvLen(self: *Abridged) !usize {
             try self.reader.readSliceAll(&lenB);
             if (lenB[0] >= 127) {
                 self.mode = .FullBytes;
-                return self.recvLen();
+            } else {
+                self.mode = .Payload;
+                self.len = (@as(usize, lenB[0]) * 4);
             }
-            self.mode = .Payload;
-            self.len = (@as(usize, lenB[0]) * 4);
-            return self.len;
         },
-        .FullBytes => {
-            var len: [4]u8 = .{0} ** 4;
-            try self.reader.readSliceAll(len[0..3]);
-            self.len = @as(usize, std.mem.readInt(u32, &len, .little)) * 4;
-            self.mode = .Payload;
-            return self.len;
-        },
-        .Payload => {
-            return self.len;
-        },
+        .FullBytes => {},
+        .Payload => {},
     }
+
+    if (self.mode == .FullBytes) {
+        var len: [4]u8 = .{0} ** 4;
+        try self.reader.readSliceAll(len[0..3]);
+        self.len = @as(usize, std.mem.readInt(u32, &len, .little)) * 4;
+        self.mode = .Payload;
+    }
+
+    return self.len;
 }
 
-pub fn recv(self: *Abridged, buf: []u8) !usize {
+pub fn recv(self: *Abridged, io: std.Io, buf: []u8) !usize {
+    try self.mutex_read.lock(io);
+    defer self.mutex_read.unlock(io);
+
     switch (self.mode) {
         .SingleByte, .FullBytes => {
             return Error.LengthNotRead;
@@ -71,7 +66,7 @@ pub fn recv(self: *Abridged, buf: []u8) !usize {
             const len_dest = @min(buf.len, self.len);
             try self.reader.readSliceAll(buf[0..len_dest]);
             self.len -= len_dest;
-            if (self.len <= 0) {
+            if (self.len == 0) {
                 self.mode = .SingleByte;
             }
             return len_dest;
@@ -79,7 +74,10 @@ pub fn recv(self: *Abridged, buf: []u8) !usize {
     }
 }
 
-pub fn write(self: *Abridged, buf: []const u8) !void {
+pub fn write(self: *Abridged, io: std.Io, buf: []const u8) !void {
+    try self.mutex_write.lock(io);
+    defer self.mutex_write.unlock(io);
+
     const len = @as(u8, @intCast(buf.len / 4));
 
     if (len < 0x7F) {
@@ -93,7 +91,10 @@ pub fn write(self: *Abridged, buf: []const u8) !void {
     }
 }
 
-pub fn writeVec(self: *Abridged, buf: []const []const u8) !void {
+pub fn writeVec(self: *Abridged, io: std.Io, buf: []const []const u8) !void {
+    try self.mutex_write.lock(io);
+    defer self.mutex_write.unlock(io);
+
     var len: usize = 0;
     for (buf) |i| {
         len += i.len;

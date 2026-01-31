@@ -1,17 +1,3 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
 const std = @import("std");
 const constructors = @import("../parser/constructors.zig");
 const utils = @import("./utils.zig");
@@ -177,7 +163,7 @@ pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringA
             \\        @setEvalBranchQuota(1000000);
             \\        switch (self.*) {{
             \\            inline else => |x| {{
-            \\                size.* += (@alignOf(@TypeOf(x)) - 1);
+            \\                size.* += base.ensureAligned(size.*, @alignOf(base.unwrapType(@TypeOf(x))));
             \\                x.cloneSize(size);
             \\            }},
             \\        }}
@@ -579,7 +565,7 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\            .Int => {{}},
         \\            .Long, .Double, .Bool => {{}},
         \\            .Vector => |x| {{
-        \\                size.* += (@alignOf([]const TL) - 1);
+        \\                size.* += base.ensureAligned(size.*, @alignOf([]const TL));
         \\                size.* += x.len * @sizeOf(TL);
         \\                for (x) |item| {{
         \\                    item.cloneSize(size);
@@ -589,7 +575,7 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\              size.* += x.len;
         \\            }},
         \\            inline else => |x| {{
-        \\                size.* += (@alignOf(@TypeOf(x)) - 1);
+        \\                size.* += base.ensureAligned(size.*, @alignOf(base.unwrapType(@TypeOf(x))));
         \\                x.cloneSize(size);
         \\            }},
         \\        }}
@@ -622,9 +608,9 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\            }},
         \\            .Vector => |x| {{
         \\                var written: usize = base.ensureAligned(@intFromPtr(out[0..].ptr), @alignOf([]const TL));
-        \\                var vector = @as([]const TL, @alignCast(std.mem.bytesAsSlice(TL, out[written .. written + (@sizeOf(TL) * x.len)])));
+        \\                var vector = @as([]TL, @alignCast(std.mem.bytesAsSlice(TL, out[written .. written + (@sizeOf(TL) * x.len)])));
         \\                for (x, 0..) |_, i| {{
-        \\                    const cloned = x.clone(@alignCast(out[written..]));
+        \\                    const cloned = x[i].clone(@alignCast(out[written..]));
         \\                    vector[i] = cloned[0];
         \\                    written += cloned[1];
         \\                }}
@@ -649,11 +635,6 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
         \\                const cloned = x.clone(@alignCast(out[alignment..]));
         \\                return .{{TL{{.ProtoRpcError = cloned[0]}}, alignment+cloned[1]}};
-        \\            }},
-        \\            .Vector => |x| {{
-        \\                const alignment = base.ensureAligned(@intFromPtr(out.ptr), @alignOf(base.unwrapType(@TypeOf(x))));
-        \\                const cloned = x.clone(@alignCast(out[alignment..]));
-        \\                return .{{TL{{.Vector = cloned[0]}}, alignment+cloned[1]}};
         \\            }},
         \\
     , .{});

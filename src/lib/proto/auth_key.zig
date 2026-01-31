@@ -1,17 +1,3 @@
-//   Copyright (c) 2025 Daniele Cortesi <https://github.com/dadadani>
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//   You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-
 const tl = @import("../tl/api.zig");
 const std = @import("std");
 const factorize = @cImport({
@@ -125,7 +111,7 @@ const AuthGen = struct {
         std.mem.writeInt(i64, headers[8..16], (try std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
         std.mem.writeInt(i32, headers[16..20], @intCast(data.len), .little);
 
-        try self.transport.writeVec(&.{ &headers, data });
+        try self.transport.writeVec(self.io, &.{ &headers, data });
     }
 
     fn reqPQ(self: *AuthGen) !utils.Deserialized {
@@ -156,12 +142,12 @@ const AuthGen = struct {
 
     /// Receive data in plain text mode
     fn recvData(self: *AuthGen) !utils.Deserialized {
-        const len = try self.transport.recvLen();
+        const len = try self.transport.recvLen(self.io);
 
         const buf = try self.allocator.alloc(u8, len);
         defer self.allocator.free(buf);
 
-        _ = try self.transport.recv(buf);
+        _ = try self.transport.recv(self.io, buf);
 
         const len_body = std.mem.readInt(u32, buf[16..20], .little);
         var size: usize = 0;
