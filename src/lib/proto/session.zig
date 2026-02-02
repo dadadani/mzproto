@@ -46,7 +46,7 @@ pub fn isContentRelated(obj: tl.TL) bool {
 
 const Session = @This();
 
-const PendingRequest = struct {
+const PendingAnswer = struct {
     event: std.Io.Event = .unset,
     proto_req_id: ?u64 = null,
     deserializeResultSize: *const (fn (in: []const u8, size: *usize) usize),
@@ -55,6 +55,12 @@ const PendingRequest = struct {
     // data: union(enum) { none: struct {}, data: []u8, rpc_error: struct { *tl.ProtoRpcError, []u8 } } = .{ .none = .{} },
 };
 
+const Request = struct {
+    id: u32,
+    data: []u8,
+    data_len: usize,
+    content_related: bool,
+};
 seq_no: usize,
 
 salts: std.ArrayList(tl.ProtoFutureSalt),
@@ -64,12 +70,12 @@ pending_ack: std.ArrayList(u64),
 //salt: tl.ProtoFutureSalt,
 session_id: u64,
 message_id: MessageID,
-pending_requests_idmap: std.AutoArrayHashMapUnmanaged(u64, u32),
-pending_requests: struct {
-    map: std.AutoArrayHashMapUnmanaged(u32, PendingRequest),
+pending_answers_idmap: std.AutoArrayHashMapUnmanaged(u64, u32),
+pending_answers: struct {
+    map: std.AutoArrayHashMapUnmanaged(u32, PendingAnswer),
 
     /// The mutex is assumed to be already acquired.
-    pub fn create(self: *@This(), allocator: std.mem.Allocator, id: u32) !*PendingRequest {
+    pub fn create(self: *@This(), allocator: std.mem.Allocator, id: u32) !*PendingAnswer {
         const req = try self.map.getOrPut(allocator, id);
         if (req.found_existing)
             return req.value_ptr;
@@ -83,12 +89,7 @@ pending_requests: struct {
 mutex: std.Io.Mutex,
 
 // Thread-safe
-requests_queue: std.Io.Queue(struct {
-    id: u32,
-    data: []u8,
-    data_len: usize,
-    content_related: bool,
-}),
+requests_queue: std.Io.Queue(Request),
 current_id: std.atomic.Value(u32) = .init(0),
 shutdown: std.atomic.Value(bool) = .init(false),
 waiting_requests: std.atomic.Value(u32) = .init(0),
@@ -191,17 +192,16 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
 }
 
 fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.ProtoRPCResult) !void {
-
     const req = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const req_id = self.pending_requests_idmap.get(rpc_result.req_msg_id) orelse {
+        const req_id = self.pending_answers_idmap.get(rpc_result.req_msg_id) orelse {
             // TODO: do something?
             return;
         };
 
-        const req = self.pending_requests.map.getPtr(req_id) orelse {
+        const req = self.pending_answers.map.getPtr(req_id) orelse {
             // TODO: do something?
             return;
         };
@@ -213,7 +213,6 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
     if (tl.TL.identify(id)) |ty| {
         switch (ty) {
             .ProtoRpcError => {
-
                 var size: usize = 0;
                 _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
 
@@ -230,7 +229,6 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
                 req.event.set(io);
             },
             .ProtoGzipPacked => {
-
                 const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
                 var reader = std.Io.Reader.fixed(gzip);
 
@@ -308,14 +306,14 @@ fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message:
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const req_id = self.pending_requests_idmap.get(pong.msg_id) orelse {
+        const req_id = self.pending_answers_idmap.get(pong.msg_id) orelse {
             // TODO: do something?
 
             allocator.free(buf);
             return;
         };
 
-        const req = self.pending_requests.map.getPtr(req_id) orelse {
+        const req = self.pending_answers.map.getPtr(req_id) orelse {
             // TODO: do something?
 
             allocator.free(buf);
@@ -468,6 +466,7 @@ fn determineMessagePadding(len: usize) usize {
     return if (remainder == 0) 12 else 12 + (16 - remainder);
 }
 
+
 pub fn worker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
     const req = try self.requests_queue.getOne(io);
 
@@ -475,7 +474,7 @@ pub fn worker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transpor
 
     errdefer {
         self.mutex.lockUncancelable(io);
-        if (self.pending_requests.map.getPtr(req.id)) |pending_req| {
+        if (self.pending_answers.map.getPtr(req.id)) |pending_req| {
             pending_req.event.set(io);
         }
         self.mutex.unlock(io);
@@ -495,25 +494,27 @@ pub fn worker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transpor
 
         try self.encryptMessage(io, req.data, seqno, msgid, req.data_len);
 
-        try self.pending_requests_idmap.put(
+        try self.pending_answers_idmap.put(
             allocator,
             msgid,
             req.id,
         );
 
-        self.pending_requests.map.getPtr(req.id).?.proto_req_id = msgid;
+        self.pending_answers.map.getPtr(req.id).?.proto_req_id = msgid;
 
         break :blk msgid;
     };
 
     errdefer {
         self.mutex.lockUncancelable(io);
-        _ = self.pending_requests_idmap.swapRemove(msgid);
+        _ = self.pending_answers_idmap.swapRemove(msgid);
         self.mutex.unlock(io);
     }
 
     try transport.write(io, req.data);
 }
+
+
 
 /// Enqueues a new TL function into the reader worker queue, and waits for the result.
 ///
@@ -541,34 +542,45 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 
     const id = self.current_id.fetchAdd(1, .seq_cst);
 
-    const buf = try allocator.alloc(u8, offset_end);
+    defer {
+        self.mutex.lockUncancelable(io);
 
-    _ = message.serialize(buf[offset_data..offset_padding]);
+        _ = self.pending_answers.map.swapRemove(id);
+        self.mutex.unlock(io);
+    }
 
-    const req = brk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+    const answer = answ: {
+        const buf = try allocator.alloc(u8, offset_end);
 
-        const req = try self.pending_requests.create(allocator, id);
+        errdefer allocator.free(buf);
 
-        req.deserializeResult = deserializeResult;
-        req.deserializeResultSize = deserializeResultSize;
+        _ = message.serialize(buf[offset_data..offset_padding]);
 
-        break :brk req;
+        const answer = brk: {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            const req = try self.pending_answers.create(allocator, id);
+
+            req.deserializeResult = deserializeResult;
+            req.deserializeResultSize = deserializeResultSize;
+
+            break :brk req;
+        };
+
+        try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message), .data_len = len_serialized });
+
+        break :answ answer;
     };
 
     defer {
         self.mutex.lockUncancelable(io);
-        if (req.proto_req_id) |proto_req_id| {
-            _ = self.pending_requests_idmap.swapRemove(proto_req_id);
+
+        if (answer.proto_req_id) |proto_req_id| {
+            _ = self.pending_answers_idmap.swapRemove(proto_req_id);
         }
-        _ = self.pending_requests.map.swapRemove(id);
         self.mutex.unlock(io);
     }
-    self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message), .data_len = len_serialized }) catch |e| {
-        allocator.free(buf);
-        return e;
-    };
 
     {
         _ = self.waiting_requests.fetchAdd(1, .seq_cst);
@@ -579,10 +591,10 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
             }
         }
 
-        try req.event.wait(io);
+        try answer.event.wait(io);
     }
 
-    if (req.data) |data| {
+    if (answer.data) |data| {
         return data;
     } else {
         return SendError.Unknown;
@@ -655,7 +667,7 @@ pub fn destroyRequests(self: *Session, io: std.Io) void {
     self.mutex.lockUncancelable(io);
     self.shutdown.store(true, .release);
 
-    var it = self.pending_requests.map.iterator();
+    var it = self.pending_answers.map.iterator();
     while (it.next()) |pending_req| {
         pending_req.value_ptr.event.set(io);
     }
@@ -683,16 +695,16 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
     self.requests_queue.close(io);
     self.salts.deinit(allocator);
     self.pending_ack.deinit(allocator);
-    self.pending_requests_idmap.deinit(allocator);
+    self.pending_answers_idmap.deinit(allocator);
 
-    var it = self.pending_requests.map.iterator();
+    var it = self.pending_answers.map.iterator();
     while (it.next()) |pending_req| {
         if (pending_req.value_ptr.data) |data| {
             pending_req.value_ptr.data = null;
             allocator.free(data.ptr);
         }
     }
-    self.pending_requests.map.deinit(allocator);
+    self.pending_answers.map.deinit(allocator);
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, test_mode: bool, is_cdn: bool, is_media: bool) !Session {
@@ -708,7 +720,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: t
         .session_id = undefined,
         .auth_key_id = undefined,
         .pending_ack = .{},
-        .pending_requests = .{
+        .pending_answers = .{
             .map = .{},
         },
         .current_id = .init(0),
@@ -716,7 +728,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: t
         .waiting_requests = .init(0),
         .shutdown_event = .unset,
         .mutex = .init,
-        .pending_requests_idmap = .{},
+        .pending_answers_idmap = .{},
         .requests_queue = .init(&.{}),
     };
 
