@@ -108,7 +108,7 @@ const AuthGen = struct {
         var headers: [@sizeOf(i64) + @sizeOf(i64) + @sizeOf(i32)]u8 = undefined;
 
         @memset(headers[0..8], 0);
-        std.mem.writeInt(i64, headers[8..16], (try std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
+        std.mem.writeInt(i64, headers[8..16], (std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
         std.mem.writeInt(i32, headers[16..20], @intCast(data.len), .little);
 
         try self.transport.writeVec(self.io, &.{ &headers, data });
@@ -124,7 +124,7 @@ const AuthGen = struct {
         try self.sendData(data[0..toWrite]);
 
         const d = try self.recvData();
-        errdefer self.allocator.free(d.ptr);
+        errdefer d.deinit(self.allocator);
 
         if (d.data != .ProtoResPQ) {
             self.status = .Failed;
@@ -226,7 +226,7 @@ const AuthGen = struct {
 
         const deser, const buf_deser = inner_data: {
             const d = try self.recvData();
-            defer self.allocator.free(d.ptr);
+            defer d.deinit(self.allocator);
 
             if (d.data != .ProtoServerDHParamsOk) {
                 self.status = .Failed;
@@ -402,7 +402,7 @@ const AuthGen = struct {
 
     fn setClientDH(self: *AuthGen) !GeneratedAuthKey {
         const d = try self.recvData();
-        defer self.allocator.free(d.ptr);
+        defer d.deinit(self.allocator);
         switch (d.data) {
             .ProtoDhGenOk => {
                 var result = GeneratedAuthKey{
@@ -540,7 +540,7 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport,
         .io = io,
     };
     const req_pq = try self.reqPQ();
-    defer self.allocator.free(req_pq.ptr);
+    defer req_pq.deinit(allocator);
 
     const td = req_pq.data;
     try self.reqDH(td.ProtoResPQ);

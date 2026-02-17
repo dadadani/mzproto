@@ -6,6 +6,12 @@ const ige = @import("../crypto/ige.zig").ige;
 const utils = @import("./utils.zig");
 const deserializeStringNoCopy = @import("../tl/base.zig").deserializeStringNoCopy;
 
+const SALT_THRESHOLD = 15;
+const SALTS_TO_OBTAIN = 64;
+const MAX_WORKER_BATCH = 10;
+
+const log = std.log.scoped(.mzproto_session);
+
 pub fn isContentRelated(obj: tl.TL) bool {
     return switch (obj) {
 
@@ -51,37 +57,40 @@ const PendingAnswer = struct {
     proto_req_id: ?u64 = null,
     deserializeResultSize: *const (fn (in: []const u8, size: *usize) usize),
     deserializeResult: *const (fn (noalias in: []const u8, noalias out: []u8) struct { tl.TL, usize, usize }),
-    data: ?utils.Deserialized,
+    data: ?SendError!utils.Deserialized,
     // data: union(enum) { none: struct {}, data: []u8, rpc_error: struct { *tl.ProtoRpcError, []u8 } } = .{ .none = .{} },
 };
 
 const Request = struct {
-    id: u32,
+    id: ?u32,
     data: []u8,
-    data_len: usize,
     content_related: bool,
 };
 seq_no: usize,
 
 salts: std.ArrayList(tl.ProtoFutureSalt),
+requesting_salts: bool = false,
 
 pending_ack: std.ArrayList(u64),
+pending_ack_inflight: usize = 0,
 
-//salt: tl.ProtoFutureSalt,
 session_id: u64,
 message_id: MessageID,
 pending_answers_idmap: std.AutoArrayHashMapUnmanaged(u64, u32),
 pending_answers: struct {
-    map: std.AutoArrayHashMapUnmanaged(u32, PendingAnswer),
+    map: std.AutoArrayHashMapUnmanaged(u32, *PendingAnswer),
 
     /// The mutex is assumed to be already acquired.
     pub fn create(self: *@This(), allocator: std.mem.Allocator, id: u32) !*PendingAnswer {
         const req = try self.map.getOrPut(allocator, id);
-        if (req.found_existing)
-            return req.value_ptr;
+        if (req.found_existing) {
+            return req.value_ptr.*;
+        }
 
-        req.value_ptr.* = .{ .deserializeResult = undefined, .deserializeResultSize = undefined, .data = null };
-        return req.value_ptr;
+        const pending_req = try allocator.create(PendingAnswer);
+        pending_req.* = .{ .deserializeResult = undefined, .deserializeResultSize = undefined, .data = null };
+        req.value_ptr.* = pending_req;
+        return pending_req;
     }
 },
 
@@ -103,6 +112,13 @@ is_cdn: bool,
 auth_key: [256]u8,
 auth_key_id: [8]u8,
 
+pub const SendError = error{
+    Resend, // Happens when we receive a message like bad_msg_notification, shouldn't be returned
+    NotFunction,
+    Unknown,
+    Shutdown,
+};
+
 pub const EncryptionError = error{
     AuthKeyMismatch,
     MsgKeyMismatch,
@@ -113,16 +129,15 @@ pub const EncryptionError = error{
 pub const SessionError = error{
     Transport404,
     TransportUnknown,
-    UnknownIncomingMessage,
 };
 
-pub const SendError = error{ NotFunction, Unknown, Shutdown };
+pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
 
 /// Generates the next sequence number for a message.
 /// Returns the seqno to use and updates the internal counter if content-related.
 ///
 /// The mutex is assumed to be already acquired.
-fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
+inline fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
     // The seqno of a content-related message is msg.seqNo = (current_seqno*2)+1
     // (and after generating it, the local current_seqno counter must be incremented by 1),
     // the seqno of a non-content related message is msg.seqNo = (current_seqno*2)
@@ -135,12 +150,68 @@ fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
     return seqno;
 }
 
+/// The mutex is assumed to be already acquired.
+fn getSalt(self: *Session, io: std.Io) tl.ProtoFutureSalt {
+    if (self.salts.items.len == 0) {
+        return .{ .salt = 0, .valid_since = 0, .valid_until = 0 };
+    }
+
+    if (self.salts.items.len == 1) {
+        return self.salts.items[0];
+    }
+
+    const salt = brk: {
+        var lastSalt: tl.ProtoFutureSalt = .{ .salt = 0, .valid_since = 0, .valid_until = 0 };
+        while (self.salts.pop()) |salt| {
+            lastSalt = salt;
+            if (salt.valid_since < self.message_id.getUnix(io) and salt.valid_until > self.message_id.getUnix(io)) {
+                break :brk salt;
+            }
+        }
+        break :brk lastSalt;
+    };
+
+    return salt;
+}
+
+fn maybeRequestFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.TL) void {
+    const is_get_future_salts = switch (message) {
+        .ProtoGetFutureSalts => true,
+        else => false,
+    };
+
+    if (is_get_future_salts) {
+        return;
+    }
+
+    var should_request = false;
+
+    self.mutex.lockUncancelable(io);
+    if (!self.requesting_salts and self.salts.items.len < SALT_THRESHOLD) {
+        self.requesting_salts = true;
+        should_request = true;
+    }
+    self.mutex.unlock(io);
+
+    if (!should_request) {
+        return;
+    }
+
+    log.debug("Requesting more salts - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
+    self.sendNoWait(io, allocator, tl.TL{ .ProtoGetFutureSalts = &.{ .num = SALTS_TO_OBTAIN } }) catch {
+        self.mutex.lockUncancelable(io);
+        self.requesting_salts = false;
+        self.mutex.unlock(io);
+    };
+}
+
 fn handleMsgsAck(self: *Session, message: tl.ProtoMessage) !void {
     _ = self;
     _ = message;
 }
 
-fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
+fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     var size: usize = 0;
     _ = tl.IProtoBadMsgNotification.deserializeSize(message.body, &size);
 
@@ -152,62 +223,120 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
-    switch (bad_msg) {
-        .ProtoBadServerSalt => |x| {
-            self.salts.clearAndFree(allocator);
-            try self.salts.append(allocator, .{
-                .salt = x.new_server_salt,
-                .valid_since = @intCast(try self.message_id.getUnix(io)),
-                .valid_until = std.math.maxInt(i32),
-            });
-        },
-        .ProtoBadMsgNotification => |x| {
-            switch (x.error_code) {
-                // msg_id too low (most likely, client time is wrong;
-                // it would be worthwhile to synchronize it using msg_id notifications
-                // and re-send the original message with the “correct” msg_id or wrap it in a
-                // container with a new msg_id if the original message had waited too long on the client to be transmitted)
-                16 => {
-                    try self.message_id.updateTime(io, message.msg_id >> 32);
-                },
-                // msg_id too high (similar to the previous case, the client time has to be synchronized,
-                // and the message re-sent with the correct msg_id)
-                17 => {
-                    try self.message_id.updateTime(io, message.msg_id >> 32);
-                },
-                // msg_seqno too low (the server has already received a message with a lower msg_id but with either
-                // a higher or an equal and odd seqno)
-                32 => {
-                    self.seq_no += 64;
-                },
-                // msg_seqno too high (similarly, there is a message
-                // with a higher msg_id but with either a lower or an equal and odd seqno)
-                33 => {
-                    self.seq_no -= 16;
-                },
-                else => unreachable,
-            }
-        },
-    }
+    const bad_msg_id = brk: {
+        switch (bad_msg) {
+            // incorrect server salt (in this case, the bad_server_salt response is received with
+            // the correct salt, and the message is to be re-sent with it)
+            .ProtoBadServerSalt => |x| {
+                log.warn("got ProtoBadServerSalt - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                self.salts.clearAndFree(allocator);
+                try self.salts.append(allocator, .{
+                    .salt = x.new_server_salt,
+                    .valid_since = @intCast(self.message_id.getUnix(io)),
+                    .valid_until = std.math.maxInt(i32),
+                });
+                break :brk x.bad_msg_id;
+            },
+            .ProtoBadMsgNotification => |x| {
+                switch (x.error_code) {
+                    // msg_id too low (most likely, client time is wrong;
+                    // it would be worthwhile to synchronize it using msg_id notifications
+                    // and re-send the original message with the “correct” msg_id or wrap it in a
+                    // container with a new msg_id if the original message had waited too long on the client to be transmitted)
+                    16 => {
+                        log.warn("got ProtoBadMsgNotification, msg_id too low - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                        self.message_id.updateTime(io, message.msg_id >> 32);
+                    },
+                    // msg_id too high (similar to the previous case, the client time has to be synchronized,
+                    // and the message re-sent with the correct msg_id)
+                    17 => {
+                        log.warn("got ProtoBadMsgNotification, msg_id too high - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                        self.message_id.updateTime(io, message.msg_id >> 32);
+                    },
+                    // incorrect two lower order msg_id bits (the server expects client message msg_id to be divisible by 4)
+                    18 => {
+                        // an error like that should never happen, but you never know...
+                        log.warn("got ProtoBadMsgNotification, incorrect two lower order msg_id bits - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                        self.message_id.updateTime(io, message.msg_id >> 32);
+                    },
+                    // container msg_id is the same as msg_id of a previously received message (this must never happen)
+                    19 => {
+                        // what should I even do with an error like that?
+                        log.warn("got ProtoBadMsgNotification, container msg_id is the same as msg_id of a previously received message - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                    // message too old, and it cannot be verified whether the server has received a message with this msg_id or not
+                    20 => {
+                        log.warn("got ProtoBadMsgNotification, message too old, and it cannot be verified whether the server has received a message with this msg_id or not - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                    // msg_seqno too low (the server has already received a message with a lower msg_id but with either
+                    // a higher or an equal and odd seqno)
+                    32 => {
+                        log.warn("got ProtoBadMsgNotification, msg_seqno too low - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                        self.seq_no += 64;
+                    },
+                    // msg_seqno too high (similarly, there is a message
+                    // with a higher msg_id but with either a lower or an equal and odd seqno)
+                    33 => {
+                        log.warn("got ProtoBadMsgNotification, msg_seqno too high - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                        self.seq_no -= 16;
+                    },
+                    // an even msg_seqno expected (irrelevant message), but odd received
+                    34 => {
+                        log.warn("got ProtoBadMsgNotification, an even msg_seqno expected, but odd received - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                    // odd msg_seqno expected (relevant message), but even received
+                    35 => {
+                        log.warn("got ProtoBadMsgNotification, odd msg_seqno expected, but even received - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                    // invalid container.
+                    64 => {
+                        // very descriptive. Thanks, Telegram!
+                        log.warn("got ProtoBadMsgNotification, invalid container - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                    else => {
+                        log.warn("got ProtoBadMsgNotification, unknown code {d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ x.error_code, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                    },
+                }
+                break :brk x.bad_msg_id;
+            },
+        }
+    };
+
+    const req_id = self.pending_answers_idmap.get(bad_msg_id) orelse {
+        // TODO: do something?
+        return;
+    };
+
+    const req_ptr = self.pending_answers.map.getPtr(req_id) orelse {
+        // TODO: do something?
+        return;
+    };
+
+    req_ptr.*.data = SendError.Resend;
+    req_ptr.*.event.set(io);
 }
 
-fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.ProtoRPCResult) !void {
-    const req = blk: {
+fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.ProtoRPCResult) ProcessMessageError!void {
+    const req_id, const deserializeResultSize, const deserializeResult = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
         const req_id = self.pending_answers_idmap.get(rpc_result.req_msg_id) orelse {
             // TODO: do something?
+            log.warn("Received unmapped RPC Result {d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ rpc_result.req_msg_id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
             return;
         };
 
         const req = self.pending_answers.map.getPtr(req_id) orelse {
             // TODO: do something?
+            log.warn("Received unmapped RPC Result {d}->{d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ rpc_result.req_msg_id, req_id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
             return;
         };
 
-        break :blk req;
+        break :blk .{ req_id, req.*.deserializeResultSize, req.*.deserializeResult };
     };
+
+    log.debug("Received RPC Result, {d}->{d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ rpc_result.req_msg_id, req_id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
 
     const id = std.mem.readInt(u32, rpc_result.body[0..4], .little);
     if (tl.TL.identify(id)) |ty| {
@@ -221,12 +350,16 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
 
                 const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
 
-                req.data = .{
-                    .ptr = buf,
-                    .data = tl.TL{ .ProtoRpcError = err },
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
+
+                const req = self.pending_answers.map.getPtr(req_id) orelse {
+                    allocator.free(buf);
+                    return;
                 };
 
-                req.event.set(io);
+                req.*.data = .{ .ptr = buf, .alignment = .of(tl.ProtoRpcError), .data = tl.TL{ .ProtoRpcError = err } };
+                req.*.event.set(io);
             },
             .ProtoGzipPacked => {
                 const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
@@ -238,48 +371,74 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
                 defer allocator.free(decompressed);
 
                 var size_deserialize: usize = 0;
-                _ = req.deserializeResultSize(decompressed, &size_deserialize);
+                _ = deserializeResultSize(decompressed, &size_deserialize);
 
                 const buf = try allocator.alloc(u8, size_deserialize);
                 errdefer allocator.free(buf);
 
-                const deserialized, _, _ = req.deserializeResult(decompressed, buf);
+                const deserialized, _, _ = deserializeResult(decompressed, buf);
 
-                req.data = .{ .data = deserialized, .ptr = buf };
-                req.event.set(io);
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
+
+                const req = self.pending_answers.map.getPtr(req_id) orelse {
+                    allocator.free(buf);
+                    return;
+                };
+
+                req.*.data = .{ .data = deserialized, .ptr = buf };
+                req.*.event.set(io);
             },
             else => {
                 var size_deserialize: usize = 0;
-                _ = req.deserializeResultSize(rpc_result.body, &size_deserialize);
+                _ = deserializeResultSize(rpc_result.body, &size_deserialize);
 
                 const buf = try allocator.alloc(u8, size_deserialize);
                 errdefer allocator.free(buf);
 
-                const deserialized, _, _ = req.deserializeResult(rpc_result.body, buf);
+                const deserialized, _, _ = deserializeResult(rpc_result.body, buf);
 
-                req.data = .{ .data = deserialized, .ptr = buf };
-                req.event.set(io);
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
+
+                const req = self.pending_answers.map.getPtr(req_id) orelse {
+                    allocator.free(buf);
+                    return;
+                };
+
+                req.*.data = .{ .data = deserialized, .ptr = buf };
+                req.*.event.set(io);
             },
         }
     } else {
         // Although this shouldn't happen for pretty much all of the registered functions (at the time of writing), an rpc_result may pass an object that is still valid (eg. bare constructors)
         var size_deserialize: usize = 0;
-        _ = req.deserializeResultSize(rpc_result.body, &size_deserialize);
+        _ = deserializeResultSize(rpc_result.body, &size_deserialize);
 
         const buf = try allocator.alloc(u8, size_deserialize);
         errdefer allocator.free(buf);
 
-        const deserialized, _, _ = req.deserializeResult(rpc_result.body, buf);
+        const deserialized, _, _ = deserializeResult(rpc_result.body, buf);
 
-        req.data = .{ .data = deserialized, .ptr = buf };
-        req.event.set(io);
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+
+        const req = self.pending_answers.map.getPtr(req_id) orelse {
+            allocator.free(buf);
+            return;
+        };
+
+        req.*.data = .{ .data = deserialized, .ptr = buf };
+        req.*.event.set(io);
     }
 }
 
-fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
+fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     var buf: [@sizeOf(tl.ProtoMsgDetailedInfo)]u8 align(@alignOf(tl.ProtoMsgDetailedInfo)) = undefined;
 
     const msg_detailed, _, _ = tl.IProtoMsgDetailedInfo.deserialize(message.body, &buf);
+
+    log.debug("Received ProtoMsgDetailedInfo - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
 
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
@@ -290,44 +449,73 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
     }
 }
 
-fn handleFutureSalts(_: *Session, _: tl.ProtoMessage) !void {
-    // var buf: [512]u8 align(tl.ProtoFutureSalts) = undefined;
+fn handleFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
+    var len: usize = 0;
+    _ = tl.ProtoFutureSalts.deserializeSize(message.body[4..], &len);
+
+    var found_req = false;
+
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
+    self.requesting_salts = false;
+
+    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoFutureSalts), len);
+    defer {
+        if (!found_req) {
+            allocator.free(buf);
+        }
+    }
+
+    const salts, _, _ = tl.ProtoFutureSalts.deserialize(message.body[4..], buf);
+
+    try self.salts.appendSlice(allocator, salts.salts);
+
+    log.debug("Added {d} salts - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ salts.salts.len, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
+    const req_id = self.pending_answers_idmap.get(salts.req_msg_id) orelse {
+        // TODO: do something?
+        return;
+    };
+
+    const req = self.pending_answers.map.getPtr(req_id) orelse {
+        // TODO: do something?
+        return;
+    };
+
+    found_req = true;
+
+    req.*.data = .{ .data = tl.TL{ .ProtoFutureSalts = salts }, .ptr = buf, .alignment = .of(tl.ProtoFutureSalts) };
+    req.*.event.set(io);
 
     //  const future_salts, _, _ = tl.ProtoFutureSalts.deserialize(message.body, &buf);
 
 }
 
-fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
+fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoPong), @sizeOf(tl.ProtoPong));
 
     const pong, _, _ = tl.ProtoPong.deserialize(message.body[4..], buf);
+    log.debug("Received pong, ping_id: {} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ pong.ping_id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
 
-    const req = blk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
 
-        const req_id = self.pending_answers_idmap.get(pong.msg_id) orelse {
-            // TODO: do something?
-
-            allocator.free(buf);
-            return;
-        };
-
-        const req = self.pending_answers.map.getPtr(req_id) orelse {
-            // TODO: do something?
-
-            allocator.free(buf);
-            return;
-        };
-
-        break :blk req;
+    const req_id = self.pending_answers_idmap.get(pong.msg_id) orelse {
+        allocator.free(buf);
+        return;
     };
 
-    req.data = .{ .data = .{ .ProtoPong = pong }, .ptr = buf };
-    req.event.set(io);
+    const req = self.pending_answers.map.getPtr(req_id) orelse {
+        allocator.free(buf);
+        return;
+    };
+
+    req.*.data = .{ .data = .{ .ProtoPong = pong }, .ptr = buf, .alignment = .of(tl.ProtoPong) };
+    req.*.event.set(io);
 }
 
-fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) anyerror!void {
+fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     const container = try tl.ProtoMessageContainer.deserializeContainer(allocator, message.body[4..]);
     defer allocator.free(container);
 
@@ -336,7 +524,7 @@ fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocat
     }
 }
 
-fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) anyerror!void {
+fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     const gzip = deserializeStringNoCopy(message.body[4..]);
     var reader = std.Io.Reader.fixed(gzip);
 
@@ -352,11 +540,11 @@ fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, me
     });
 }
 
-fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) !void {
+fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     //const allocator = self.arena.allocator();
 
     const id = std.mem.readInt(u32, message.body[0..4], .little);
-    //std.debug.print("received {any}\n", .{tl.TL.identify(id)});
+    //std.debug.print("received {any}", .{tl.TL.identify(id)});
 
     if (tl.TL.identify(id)) |ty| {
         switch (ty) {
@@ -364,21 +552,21 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             .ProtoMsgsAck => try self.handleMsgsAck(message),
             .ProtoBadMsgNotification, .ProtoBadServerSalt => try self.handleBadNotification(io, allocator, message),
             .ProtoMsgDetailedInfo, .ProtoMsgNewDetailedInfo => try self.handleNewDetailedInfo(io, allocator, message),
-            .ProtoFutureSalt => try self.handleFutureSalts(message),
+            .ProtoFutureSalts => try self.handleFutureSalts(io, allocator, message),
             .ProtoPong => try self.handlePong(io, allocator, message),
             .ProtoMessageContainer => try self.handleMessageContainer(io, allocator, message),
             .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
             else => {
-                // std.debug.print("got {any} to handle\n", .{ty});
+                // std.debug.print("got {any} to handle", .{ty});
             },
         }
     } else {
-        return SessionError.UnknownIncomingMessage;
+        return ProcessMessageError.UnknownIncomingMessage;
     }
 }
 
-pub fn recvMessageTransport(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
-    for (0..2) |_| {
+pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
+    while (true) {
         const len = try transport.recvLen(io);
 
         const buf = try allocator.alloc(u8, len);
@@ -386,6 +574,8 @@ pub fn recvMessageTransport(self: *Session, io: std.Io, allocator: std.mem.Alloc
 
         if (buf.len == 4) {
             const code = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
+            log.err("Received transport error {} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ code, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
             if (code == 404) {
                 return SessionError.Transport404;
             }
@@ -399,6 +589,8 @@ pub fn recvMessageTransport(self: *Session, io: std.Io, allocator: std.mem.Alloc
         const message_bytes = buf[8 + 16 + 8 + 8 ..];
 
         const message = tl.ProtoMessage.deserializeNoCopy(message_bytes);
+
+        log.debug("Incoming message, type {any} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ tl.TL.identify(std.mem.readInt(u32, @ptrCast(message.body[0..4]), .little)), self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
 
         try self.processMessage(io, allocator, message);
     }
@@ -460,61 +652,225 @@ fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
 }
 
 /// Determines how much padding is needed for the plaintext part of a message.
-fn determineMessagePadding(len: usize) usize {
+inline fn determineMessagePadding(len: usize) usize {
     // Padding must be 12-1024 bytes, total length divisible by 16
     const remainder = (len + 12) % 16;
     return if (remainder == 0) 12 else 12 + (16 - remainder);
 }
 
+fn payloadLen(requests: []const Request, pending_acks: []const u64) struct { usize, usize, bool } {
+    // if we have more than one request, or we have pending acks to send, we'll use a message container
+    const use_container = if (requests.len > 1 or pending_acks.len > 0) true else false;
 
-pub fn worker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
-    const req = try self.requests_queue.getOne(io);
+    var data_size: usize = 0;
 
-    defer allocator.free(req.data);
-
-    errdefer {
-        self.mutex.lockUncancelable(io);
-        if (self.pending_answers.map.getPtr(req.id)) |pending_req| {
-            pending_req.event.set(io);
-        }
-        self.mutex.unlock(io);
+    if (use_container) {
+        data_size += 4 // cid
+            + 4; // len
     }
 
-    const msgid = blk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-
-        if (self.shutdown.load(.acquire)) {
-            return;
-        }
-
-        const seqno = self.nextSeqNo(req.content_related);
-
-        const msgid = try self.message_id.get(io);
-
-        try self.encryptMessage(io, req.data, seqno, msgid, req.data_len);
-
-        try self.pending_answers_idmap.put(
-            allocator,
-            msgid,
-            req.id,
-        );
-
-        self.pending_answers.map.getPtr(req.id).?.proto_req_id = msgid;
-
-        break :blk msgid;
-    };
-
-    errdefer {
-        self.mutex.lockUncancelable(io);
-        _ = self.pending_answers_idmap.swapRemove(msgid);
-        self.mutex.unlock(io);
+    if (pending_acks.len > 0) {
+        data_size += 8 // msg_id
+            + 4 // seq_no
+            + 4 // bytes
+            + (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serializeSize();
     }
 
-    try transport.write(io, req.data);
+    for (requests) |req| {
+        if (use_container) {
+            data_size += 8 // msg_id
+                + 4 // seq_no
+                + 4; // bytes
+        }
+        data_size += req.data.len;
+    }
+
+    const offset_auth_key_id = 0;
+    const offset_msg_key = offset_auth_key_id + 8;
+    const offset_salt = offset_msg_key + 16;
+    const offset_session_id = offset_salt + 8;
+    const offset_message_id = offset_session_id + 8;
+    const offset_seqno = offset_message_id + 8;
+    const offset_len_data = offset_seqno + 4;
+    const offset_data = offset_len_data + 4;
+    const offset_padding = offset_data + data_size;
+    const offset_end = offset_padding + determineMessagePadding(offset_padding - offset_salt);
+
+    return .{ offset_end, data_size, use_container };
 }
 
+fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: []const Request, pending_acks: []const u64, inner_msg_ids: []u64, out: []u8) void {
+    const offset_auth_key_id = 0;
+    const offset_msg_key = offset_auth_key_id + 8;
+    const offset_salt = offset_msg_key + 16;
+    const offset_session_id = offset_salt + 8;
+    const offset_message_id = offset_session_id + 8;
+    const offset_seqno = offset_message_id + 8;
+    const offset_len_data = offset_seqno + 4;
+    const offset_data = offset_len_data + 4;
+    const offset_padding = offset_data + data_size;
+    const offset_end = offset_padding + determineMessagePadding(offset_padding - offset_salt);
+    _ = offset_end;
 
+    const use_container = if (requests.len > 1 or pending_acks.len > 0) true else false;
+
+    if (use_container) {
+        std.mem.writeInt(u32, out[offset_data .. offset_data + 4], 0x73f1f8dc, .little);
+        std.mem.writeInt(u32, out[offset_data + 4 .. offset_data + 4 + 4], @intCast(requests.len + (if (pending_acks.len > 0) @as(u32, 1) else 0)), .little);
+
+        var b: usize = 0;
+
+        if (pending_acks.len > 0) {
+            const msg_id = self.message_id.get(io);
+            std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
+            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(false), .little);
+
+            const data_wr = (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serialize(out[offset_data + 4 + 4 + b + 8 + 4 + 4 ..]);
+
+            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4]), @intCast(data_wr), .little);
+
+            b += 8 + 4 + 4 + data_wr;
+        }
+
+        for (requests, 0..) |req, i| {
+            const msg_id = self.message_id.get(io);
+            inner_msg_ids[i] = msg_id;
+            if (req.id) |id| {
+                self.pending_answers_idmap.putAssumeCapacity(msg_id, id);
+                if (self.pending_answers.map.getPtr(id)) |pending_answer| {
+                    pending_answer.*.proto_req_id = msg_id;
+                }
+            }
+
+            std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
+            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(req.content_related), .little);
+            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4]), @intCast(req.data.len), .little);
+            @memcpy(out[offset_data + 4 + 4 + b + 8 + 4 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4 + req.data.len], req.data);
+
+            b += 8 + 4 + 4 + req.data.len;
+        }
+        return;
+    }
+
+    @memcpy(out[offset_data..offset_padding], requests[0].data);
+}
+
+pub fn writerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) !void {
+    {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        self.requesting_salts = false;
+    }
+
+    var batch: [MAX_WORKER_BATCH]Request = undefined;
+
+    while (true) {
+        const batch_size = try self.requests_queue.get(io, &batch, 1);
+
+        log.debug("Processing {d} messages - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ batch_size, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
+        defer {
+            for (batch[0..batch_size]) |req| {
+                allocator.free(req.data);
+            }
+        }
+
+        errdefer {
+            self.mutex.lockUncancelable(io);
+            for (batch[0..batch_size]) |req| {
+                if (req.id) |id| {
+                    if (self.pending_answers.map.getPtr(id)) |pending_req| {
+                        pending_req.*.event.set(io);
+                    }
+                }
+            }
+            self.mutex.unlock(io);
+        }
+
+        const buf, const inner_msg_ids = blk: {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            const pending_acks = self.pending_ack.items;
+            self.pending_ack_inflight = pending_acks.len;
+            errdefer self.pending_ack_inflight = 0;
+
+            const offset_end, const data_size, const use_container = payloadLen(batch[0..batch_size], pending_acks);
+
+            const inner_msg_ids = try allocator.alloc(u64, batch_size);
+            errdefer allocator.free(inner_msg_ids);
+
+            const buf = try allocator.alloc(u8, offset_end);
+            errdefer allocator.free(buf);
+
+            try self.pending_answers_idmap.ensureUnusedCapacity(allocator, batch_size);
+
+            self.payloadCreate(io, data_size, batch[0..batch_size], pending_acks, inner_msg_ids, buf);
+
+            const seqno = self.nextSeqNo(if (use_container) false else batch[0..batch_size][0].content_related);
+
+            const msgid = self.message_id.get(io);
+            if (!use_container) {
+                if (batch[0].id) |id| {
+                    try self.pending_answers_idmap.put(allocator, msgid, id);
+                    if (self.pending_answers.map.getPtr(id)) |pending_answer| {
+                        pending_answer.*.proto_req_id = msgid;
+                    }
+                    inner_msg_ids[0] = msgid;
+                }
+            }
+
+            try self.encryptMessage(io, buf, seqno, msgid, data_size);
+
+            break :blk .{ buf, inner_msg_ids };
+        };
+
+        errdefer {
+            self.mutex.lockUncancelable(io);
+            self.pending_ack_inflight = 0;
+            self.mutex.unlock(io);
+        }
+
+        defer allocator.free(inner_msg_ids);
+        defer allocator.free(buf);
+
+        errdefer {
+            self.mutex.lockUncancelable(io);
+            for (inner_msg_ids) |msgid| {
+                _ = self.pending_answers_idmap.swapRemove(msgid);
+            }
+            self.mutex.unlock(io);
+        }
+        try transport.write(io, buf);
+
+        self.mutex.lockUncancelable(io);
+        const remaining_len = self.pending_ack.items.len - self.pending_ack_inflight;
+        std.mem.copyForwards(u64, self.pending_ack.items[0..remaining_len], self.pending_ack.items[self.pending_ack_inflight..]);
+        self.pending_ack.items.len = remaining_len;
+        self.pending_ack_inflight = 0;
+        self.mutex.unlock(io);
+    }
+}
+
+/// Enqueues a new TL function into the reader worker queue, without waiting for it to be acknowledged
+pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.TL) !void {
+    if (self.shutdown.load(.acquire)) {
+        return SendError.Shutdown;
+    }
+
+    log.debug("Sending (nowait) {any} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ message, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
+    const len_serialized = message.serializeSize();
+
+    const buf = try allocator.alloc(u8, len_serialized);
+    errdefer allocator.free(buf);
+
+    _ = message.serialize(buf);
+
+    try self.requests_queue.putOne(io, .{ .id = null, .data = buf, .content_related = isContentRelated(message) });
+
+    self.maybeRequestFutureSalts(io, allocator, message);
+}
 
 /// Enqueues a new TL function into the reader worker queue, and waits for the result.
 ///
@@ -528,33 +884,25 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 
     const len_serialized = message.serializeSize();
 
-    // To avoid re-allocating again once we need to encrypt the message, we determine the full length in advance
-    const offset_auth_key_id = 0;
-    const offset_msg_key = offset_auth_key_id + 8;
-    const offset_salt = offset_msg_key + 16;
-    const offset_session_id = offset_salt + 8;
-    const offset_message_id = offset_session_id + 8;
-    const offset_seqno = offset_message_id + 8;
-    const offset_len_data = offset_seqno + 4;
-    const offset_data = offset_len_data + 4;
-    const offset_padding = offset_data + len_serialized;
-    const offset_end = offset_padding + determineMessagePadding(offset_padding - offset_salt); // padding is based on encrypted portion length
-
     const id = self.current_id.fetchAdd(1, .seq_cst);
 
     defer {
         self.mutex.lockUncancelable(io);
 
-        _ = self.pending_answers.map.swapRemove(id);
+        if (self.pending_answers.map.fetchSwapRemove(id)) |kv| {
+            allocator.destroy(kv.value);
+        }
         self.mutex.unlock(io);
     }
 
+    log.debug("Sending {any}, id: {d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ message, id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+
     const answer = answ: {
-        const buf = try allocator.alloc(u8, offset_end);
+        const buf = try allocator.alloc(u8, len_serialized);
 
         errdefer allocator.free(buf);
 
-        _ = message.serialize(buf[offset_data..offset_padding]);
+        _ = message.serialize(buf);
 
         const answer = brk: {
             try self.mutex.lock(io);
@@ -568,7 +916,9 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
             break :brk req;
         };
 
-        try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message), .data_len = len_serialized });
+        try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message) });
+
+        self.maybeRequestFutureSalts(io, allocator, message);
 
         break :answ answer;
     };
@@ -595,7 +945,13 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     }
 
     if (answer.data) |data| {
-        return data;
+        return data catch |err| {
+            if (err == SendError.Resend) {
+                log.debug("Need to resend message, id: {d} - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ id, self.dc_id, self.is_test_mode, self.is_cdn, self.is_media });
+                return self.send(io, allocator, message);
+            }
+            return err;
+        };
     } else {
         return SendError.Unknown;
     }
@@ -603,7 +959,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 
 /// Encrypts raw bytes in-place into a message to be sent directly to Telegram's servers.
 /// The mutex is assumed to be already acquired.
-fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, message_id: u64, message_len: usize) !void {
+fn encryptMessage(self: *Session, io: std.Io, data: []u8, seqno: usize, message_id: u64, message_len: usize) !void {
     const offset_auth_key_id = 0;
     const offset_msg_key = offset_auth_key_id + 8;
     const offset_salt = offset_msg_key + 16;
@@ -617,7 +973,7 @@ fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, me
     const padding = determineMessagePadding(offset_padding - offset_salt);
 
     // write data to encrypt
-    std.mem.writeInt(u64, data[offset_salt..][0..8], self.salts.items[0].salt, .little);
+    std.mem.writeInt(u64, data[offset_salt..][0..8], self.getSalt(io).salt, .little);
     std.mem.writeInt(u64, data[offset_session_id..][0..8], self.session_id, .little);
     std.mem.writeInt(u64, data[offset_message_id..][0..8], message_id, .little);
     std.mem.writeInt(u32, data[offset_seqno..][0..4], @intCast(seqno), .little);
@@ -666,10 +1022,11 @@ fn encryptMessage(self: *const Session, io: std.Io, data: []u8, seqno: usize, me
 pub fn destroyRequests(self: *Session, io: std.Io) void {
     self.mutex.lockUncancelable(io);
     self.shutdown.store(true, .release);
+    self.shutdown_event.reset();
 
     var it = self.pending_answers.map.iterator();
     while (it.next()) |pending_req| {
-        pending_req.value_ptr.event.set(io);
+        pending_req.value_ptr.*.event.set(io);
     }
     if (self.waiting_requests.load(.acquire) == 0) {
         self.shutdown_event.set(io);
@@ -684,13 +1041,17 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
     self.mutex.lockUncancelable(io);
     // keep the mutex always locked, since this session shouldn't be used ever again
     while (true) {
-        if (self.requests_queue.capacity() == 0) {
-            break;
-        }
-        const req = self.requests_queue.getOneUncancelable(io) catch {
+        var requests: [10]Request = undefined;
+        const len = self.requests_queue.getUncancelable(io, &requests, 0) catch {
             break;
         };
-        allocator.free(req.data);
+        if (len == 0) {
+            break;
+        }
+
+        for (0..len) |i| {
+            allocator.free(requests[i].data);
+        }
     }
     self.requests_queue.close(io);
     self.salts.deinit(allocator);
@@ -699,15 +1060,22 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
 
     var it = self.pending_answers.map.iterator();
     while (it.next()) |pending_req| {
-        if (pending_req.value_ptr.data) |data| {
-            pending_req.value_ptr.data = null;
-            allocator.free(data.ptr);
+        const req = pending_req.value_ptr.*;
+        if (req.data) |data| {
+            req.data = null;
+            const data_ok = data catch {
+                allocator.destroy(req);
+                continue;
+            };
+            data_ok.deinit(allocator);
         }
+        allocator.destroy(req);
     }
     self.pending_answers.map.deinit(allocator);
 }
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: tl.ProtoFutureSalt, dc_id: u8, test_mode: bool, is_cdn: bool, is_media: bool) !Session {
+    log.info("Initializing session - dc {}, test_mode: {}, is_cdn: {}, is_media: {}", .{ dc_id, test_mode, is_cdn, is_media });
     var self = Session{
         .dc_id = dc_id,
         .is_test_mode = test_mode,
@@ -742,7 +1110,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, auth_key: [256]u8, salt: t
 
     // Update the message_id time with the system host's time.
     // We use this one as the "best guess", if we receive a bad_msg_notification, then we synchronize it with the expected time
-    try self.message_id.updateTime(io, @intCast((try std.Io.Clock.now(.real, io)).toSeconds()));
+    self.message_id.updateTime(io, @intCast((std.Io.Clock.now(.real, io)).toSeconds()));
 
     try self.salts.append(allocator, salt);
 

@@ -25,7 +25,7 @@ pub const ProtoMessage = struct {
 };
 
 pub const ProtoMessageContainer = struct {
-    pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) ![]ProtoMessage {
+    pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) std.mem.Allocator.Error![]ProtoMessage {
         const len = std.mem.readInt(u32, in[0..4], .little);
 
         const container = try allocator.alloc(ProtoMessage, len);
@@ -178,7 +178,9 @@ pub fn ProtoFutureSalts(comptime TL: type, comptime ProtoFutureSalt: type) type 
             return .{ self_out, written };
         }
 
-        pub fn deserialize(src: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
+        const This = @This();
+
+        pub fn deserialize(src: []const u8, out: []align(@alignOf(@This())) u8) struct { *This, usize, usize } {
             //const alignment = ensureAligned(written.*, @alignOf(*@This()));
 
             const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
