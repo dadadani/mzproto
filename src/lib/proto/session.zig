@@ -14,7 +14,7 @@ const PING_WRITE_INTERVAL_SECS = 30;
 
 const log = std.log.scoped(.mzproto_session);
 
-pub fn isContentRelated(obj: tl.TL) bool {
+pub fn isContentRelated(obj: tl.TL.Enum) bool {
     return switch (obj) {
 
         // A client must never mark msgs_ack, msg_container, msg_copy, gzip_packed constructors (i.e. containers and acknowledgements)
@@ -495,8 +495,23 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
+    // TODO: check this in detail, we might want to handle things differently
+
     switch (msg_detailed) {
-        .ProtoMsgDetailedInfo => |detailed_info| try self.pending_ack.append(allocator, detailed_info.answer_msg_id),
+        // By the docs, this constructor is sent when the client sends an rpc request with a duplicate msg_id and the response is large.
+        // This shouldn't probably happen normally since every message sent by the client always have a fresh msg_id, but handling is a good idea nonetheless
+        .ProtoMsgDetailedInfo => |detailed_info| {
+            if (self.pending_answers_idmap.contains(detailed_info.msg_id)) {
+                self.sendNoWait(io, allocator, tl.TL{ .ProtoMsgResendReq = &.{ .msg_ids = &.{detailed_info.answer_msg_id} } }) catch {
+                    //
+                };
+            } else {
+                // we are not pending an answer, acknowledging it is fine
+                try self.pending_ack.append(allocator, detailed_info.answer_msg_id);
+            }
+        },
+        // This variant is used we the server sends a message that is not bound to an rpc_result (eg. updates).
+        // We will probably never need it since this part is generally handled by the higher-level update handler
         .ProtoMsgNewDetailedInfo => |new_detailed_info| try self.pending_ack.append(allocator, new_detailed_info.answer_msg_id),
     }
 }
@@ -618,8 +633,6 @@ fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Alloca
             });
         }
 
-        try self.pending_ack.append(allocator, message.msg_id);
-
         // TODO: signal the main update handler to recover updates
     }
 }
@@ -644,6 +657,10 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             else => {
                 // std.debug.print("got {any} to handle", .{ty});
             },
+        }
+
+        if (isContentRelated(ty)) {
+            try self.pending_ack.append(allocator, message.msg_id);
         }
     } else {
         return ProcessMessageError.UnknownIncomingMessage;
@@ -842,6 +859,7 @@ fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: []const
 
         if (pending_acks.len > 0) {
             const msg_id = self.message_id.get(io);
+            // sorry about the hardcoded offsets
             std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
             std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(false), .little);
 
@@ -1090,6 +1108,8 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
             }
         }
 
+        // TODO: add a timeout, so we can send something like `msg_resend_req`/`msgs_state_req` if we don't get an answer after some time
+        // TODO: add full cancellation support by sending `rpc_drop_answer`. probably won't be implemented soon
         try answer.event.wait(io);
     }
 
