@@ -1,4 +1,4 @@
-const TcpAbridged = @import("transport/tcp_abridged.zig");
+const Abridged = @import("transport/abridged.zig");
 
 const std = @import("std");
 
@@ -7,7 +7,7 @@ pub const Error = error{ LengthNotRead, LengthAlreadyConsumed };
 pub const Transports = std.meta.Tag(TransportUnion);
 
 const TransportUnion = union(enum) {
-    TcpAbridged: TcpAbridged,
+    Abridged: Abridged,
 };
 
 pub const Transport = struct {
@@ -15,8 +15,8 @@ pub const Transport = struct {
 
     pub fn init(transport_mode: Transports, writer: *std.Io.Writer, reader: *std.Io.Reader) !Transport {
         switch (transport_mode) {
-            .TcpAbridged => {
-                return .{ .transport = .{ .TcpAbridged = try TcpAbridged.init(writer, reader) } };
+            .Abridged => {
+                return .{ .transport = .{ .Abridged = try Abridged.init(writer, reader) } };
             },
         }
     }

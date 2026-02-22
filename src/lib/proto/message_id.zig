@@ -9,14 +9,14 @@ time_offset: u64 = 0,
 
 /// Syncs the message ID generator with the server's time.
 pub fn updateTime(self: *MessageID, io: std.Io, server_time: u64) void {
-    self.reference_monotime = std.Io.Clock.now(.awake, io);
+    self.reference_monotime = std.Io.Clock.now(.boot, io);
 
     self.server_time = server_time;
 }
 
 /// Returns the current unix timestamp adjusted to server time.
 pub fn getUnix(self: *MessageID, io: std.Io) u64 {
-    const now = @as(u64, @intCast((std.Io.Clock.now(.awake, io)).toSeconds()));
+    const now = @as(u64, @intCast((std.Io.Clock.now(.boot, io)).toSeconds()));
     return now - @as(u64, @intCast(self.reference_monotime.toSeconds())) + self.server_time;
 }
 

@@ -212,6 +212,8 @@ pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringA
 pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *std.Io.Writer) !void {
     try writer.print(
         \\pub const TL = union(enum) {{
+        \\    pub const Enum = std.meta.Tag(TL);
+        \\
         \\    ProtoMessageContainer: *const ProtoMessageContainer,
         \\    ProtoRPCResult: *const ProtoRPCResult,
         \\    ProtoRpcError: *const ProtoRpcError,
@@ -370,7 +372,7 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
     // identify
 
     try writer.print(
-        \\    pub fn identify(id: u32) ?std.meta.Tag(TL) {{
+        \\    pub fn identify(id: u32) ?TL.Enum {{
         \\        @setEvalBranchQuota(1000000);
         \\        switch (id) {{
         \\            0x73F1F8DC => {{

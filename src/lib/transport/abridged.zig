@@ -114,3 +114,4 @@ pub fn writeVec(self: *Abridged, io: std.Io, buf: []const []const u8) !void {
         try self.writer.flush();
     }
 }
+
