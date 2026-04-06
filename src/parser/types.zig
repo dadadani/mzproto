@@ -41,7 +41,7 @@ pub const TLType = struct {
             }
         }
 
-        var namespaces = std.ArrayList([]const u8){};
+        var namespaces = std.ArrayList([]const u8).empty;
         errdefer {
             for (namespaces.items) |item| {
                 allocator.free(item);

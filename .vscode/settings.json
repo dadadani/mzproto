@@ -1,0 +1,5 @@
+{
+    "zig.path": "zig",
+    "zig.zls.enabled": "on",
+    "zig.zls.path": "zls"
+}

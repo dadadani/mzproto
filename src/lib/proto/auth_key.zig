@@ -10,6 +10,8 @@ const ige = @import("../crypto/ige.zig").ige;
 
 const RSAPublicKey = @import("../crypto/public_key_parser.zig");
 
+pub const TEMP_KEYS_EXPIRE_IN_S = 1800;
+
 pub const GenError = error{
     ConnectionClosed,
     InvalidResponse,
@@ -22,8 +24,9 @@ pub const GenError = error{
 } || std.mem.Allocator.Error;
 
 pub const GeneratedAuthKey = struct {
-    authKey: [256]u8,
+    auth_key: [256]u8,
     first_salt: u64,
+    expiration: ?std.Io.Clock.Timestamp,
 };
 
 fn defaultKeys() []const RSAPublicKey {
@@ -79,8 +82,9 @@ fn getPublicKey(id: u64) ?struct { u2048, u64 } {
 
 const AuthGen = struct {
     allocator: std.mem.Allocator,
-    dcId: u8,
-    testMode: bool,
+    dc_id: u8,
+    test_mode: bool,
+    temp_key: bool,
     media: bool,
     status: enum {
         Idle,
@@ -97,9 +101,10 @@ const AuthGen = struct {
     public_key: ?struct { u2048, u64 } = null,
     gA: u2048 = 0,
     b: [256]u8 = undefined,
-    dhPrime: u2048 = 0,
+    dh_prime: u2048 = 0,
     transport: *Transport,
     io: std.Io,
+    expiration: ?std.Io.Clock.Timestamp = null,
 
     /// Sends data in plain text mode.
     ///
@@ -111,7 +116,8 @@ const AuthGen = struct {
         std.mem.writeInt(i64, headers[8..16], (std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
         std.mem.writeInt(i32, headers[16..20], @intCast(data.len), .little);
 
-        try self.transport.writeVec(self.io, &.{ &headers, data });
+        var dataa = [_][]const u8{ &headers, data };
+        try self.transport.writeVec(self.io, &dataa);
     }
 
     fn reqPQ(self: *AuthGen) !utils.Deserialized {
@@ -192,8 +198,8 @@ const AuthGen = struct {
 
             //
 
-            var dcId: i32 = self.dcId;
-            if (self.testMode)
+            var dcId: i32 = self.dc_id;
+            if (self.test_mode)
                 dcId += 10000;
             if (self.media)
                 dcId = -dcId;
@@ -206,8 +212,15 @@ const AuthGen = struct {
             std.mem.writeInt(u32, &pBytes, @intCast(p), .big);
             std.mem.writeInt(u32, &qBytes, @intCast(q), .big);
 
-            const innerData = tl.TL{ .ProtoPQInnerDataDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
-            var written = innerData.serialize(&sbuf);
+            var written: usize = 0;
+
+            if (self.temp_key) {
+                const innerData = tl.TL{ .ProtoPQInnerDataTempDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq, .expires_in = TEMP_KEYS_EXPIRE_IN_S } };
+                written = innerData.serialize(&sbuf);
+            } else {
+                const innerData = tl.TL{ .ProtoPQInnerDataDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
+                written = innerData.serialize(&sbuf);
+            }
 
             const bytes = try rsaPad(self.io, sbuf[0..written], self.public_key.?[0], self.public_key.?[1]);
 
@@ -216,6 +229,9 @@ const AuthGen = struct {
             const r = tl.TL{ .ProtoReqDHParams = &.{ .encrypted_data = &bytes, .nonce = self.nonce, .p = &pBytes, .q = &qBytes, .public_key_fingerprint = selectedFingerprint, .server_nonce = self.server_nonce } };
             written = r.serialize(&req_dh);
 
+            if (self.temp_key) {
+                self.expiration = std.Io.Clock.Timestamp.now(self.io, .boot).addDuration(.{ .clock = .boot, .raw = std.Io.Duration.fromSeconds(TEMP_KEYS_EXPIRE_IN_S) });
+            }
             try self.sendData(req_dh[0..written]);
 
             self.status = .ReqDH;
@@ -319,11 +335,11 @@ const AuthGen = struct {
             return GenError.Security;
         }
 
-        self.dhPrime = std.mem.readInt(u2048, dhInnerData.dh_prime[0..256], .big);
+        self.dh_prime = std.mem.readInt(u2048, dhInnerData.dh_prime[0..256], .big);
         self.gA = std.mem.readInt(u2048, dhInnerData.g_a[0..256], .big);
         try std.Io.randomSecure(self.io, @ptrCast(&self.b));
 
-        var m = try Modulus.fromPrimitive(u2048, self.dhPrime);
+        var m = try Modulus.fromPrimitive(u2048, self.dh_prime);
 
         const x = try Modulus.Fe.fromPrimitive(u32, m, dhInnerData.g);
 
@@ -331,27 +347,27 @@ const AuthGen = struct {
 
         const gB = try gB_m.toPrimitive(u2048);
 
-        rangeCheck(@intCast(dhInnerData.g), 1, (self.dhPrime - 1)) catch |err| {
+        rangeCheck(@intCast(dhInnerData.g), 1, (self.dh_prime - 1)) catch |err| {
             self.status = .Failed;
             return err;
         };
-        rangeCheck(self.gA, 1, (self.dhPrime - 1)) catch |err| {
+        rangeCheck(self.gA, 1, (self.dh_prime - 1)) catch |err| {
             self.status = .Failed;
             return err;
         };
-        rangeCheck(@intCast(gB), 1, (self.dhPrime - 1)) catch |err| {
+        rangeCheck(@intCast(gB), 1, (self.dh_prime - 1)) catch |err| {
             self.status = .Failed;
             return err;
         };
 
         const safeRange = 1 << (2048 - 64);
 
-        rangeCheck(self.gA, safeRange, (self.dhPrime - safeRange)) catch |err| {
+        rangeCheck(self.gA, safeRange, (self.dh_prime - safeRange)) catch |err| {
             self.status = .Failed;
             return err;
         };
 
-        rangeCheck(@intCast(gB), safeRange, (self.dhPrime - safeRange)) catch |err| {
+        rangeCheck(@intCast(gB), safeRange, (self.dh_prime - safeRange)) catch |err| {
             self.status = .Failed;
             return err;
         };
@@ -406,8 +422,9 @@ const AuthGen = struct {
         switch (d.data) {
             .ProtoDhGenOk => {
                 var result = GeneratedAuthKey{
-                    .authKey = undefined,
+                    .auth_key = undefined,
                     .first_salt = 0,
+                    .expiration = self.expiration,
                 };
                 // TODO: maybe optimize this
                 var newNonce: [32]u8 = undefined;
@@ -417,16 +434,16 @@ const AuthGen = struct {
 
                 result.first_salt = std.mem.readInt(u64, newNonce[0..8], .little) ^ std.mem.readInt(u64, serverNonce[0..8], .little);
 
-                var m = try Modulus.fromPrimitive(u2048, self.dhPrime);
+                var m = try Modulus.fromPrimitive(u2048, self.dh_prime);
 
                 const x = try Modulus.Fe.fromPrimitive(u2048, m, self.gA);
 
                 const key_m = try m.powWithEncodedPublicExponent(x, &self.b, .little);
 
-                try key_m.toBytes(&result.authKey, .big);
+                try key_m.toBytes(&result.auth_key, .big);
 
                 var hash: [20]u8 = undefined;
-                std.crypto.hash.Sha1.hash(&result.authKey, &hash, .{});
+                std.crypto.hash.Sha1.hash(&result.auth_key, &hash, .{});
 
                 var hash2: [20]u8 = undefined;
 
@@ -529,14 +546,15 @@ fn rsaPad(io: std.Io, src: []const u8, m: u2048, e: u64) ![256]u8 {
     return result;
 }
 
-/// Starts the auth key generation on the specified `transport`
-pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport, dcId: u8, media: bool, test_mode: bool) !GeneratedAuthKey {
+/// Starts auth key generation on the specified `transport`
+pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport, dcId: u8, media: bool, test_mode: bool, temp_key: bool) !GeneratedAuthKey {
     var self = AuthGen{
         .allocator = allocator,
-        .dcId = dcId,
+        .dc_id = dcId,
         .media = media,
         .transport = transport,
-        .testMode = test_mode,
+        .test_mode = test_mode,
+        .temp_key = temp_key,
         .io = io,
     };
     const req_pq = try self.reqPQ();

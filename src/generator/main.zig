@@ -13,7 +13,7 @@ const GeneratorError = error{UnableToFindLayerVersion};
 const unions = @import("unions.zig");
 
 fn parseFile(allocator: std.mem.Allocator, io: std.Io, filename: []const u8) !std.ArrayList(constructors.TLConstructor) {
-    var definitions = std.ArrayList(constructors.TLConstructor){};
+    var definitions = std.ArrayList(constructors.TLConstructor).empty;
     errdefer {
         for (definitions.items) |*definition| {
             definition.deinit();
@@ -91,7 +91,7 @@ fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMap(s
             }
 
             if (!map.contains(name)) {
-                try map.put(name, std.ArrayList(constructors.TLConstructor){});
+                try map.put(name, std.ArrayList(constructors.TLConstructor).empty);
                 keep = true;
             }
 
@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
 
     try boilerplate(io.io(), &writer.interface);
 
-    var tl_union_list = std.ArrayList(TlUnionItem){};
+    var tl_union_list = std.ArrayList(TlUnionItem).empty;
     defer {
         for (tl_union_list.items) |item| {
             allocator.free(item.name);

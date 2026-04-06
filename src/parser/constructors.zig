@@ -49,7 +49,7 @@ pub const TLConstructor = struct {
             break :id .{ name, split.next() };
         };
 
-        var namespace = std.ArrayList([]const u8){};
+        var namespace = std.ArrayList([]const u8).empty;
         errdefer {
             for (namespace.items) |item| {
                 allocator.free(item);
@@ -69,7 +69,7 @@ pub const TLConstructor = struct {
             break :id try @import("./utils.zig").generateIdFromConstructor(allocator, name);
         };
 
-        var params = std.ArrayList(parameters.TLParameter){};
+        var params = std.ArrayList(parameters.TLParameter).empty;
         errdefer {
             for (params.items) |param| {
                 param.deinit();
@@ -77,7 +77,7 @@ pub const TLConstructor = struct {
             params.deinit(allocator);
         }
 
-        var type_defs = std.ArrayList([]u8){};
+        var type_defs = std.ArrayList([]u8).empty;
         defer {
             for (type_defs.items) |item| {
                 allocator.free(item);
@@ -85,7 +85,7 @@ pub const TLConstructor = struct {
             type_defs.deinit(allocator);
         }
 
-        var flag_defs = std.ArrayList([]const u8){};
+        var flag_defs = std.ArrayList([]const u8).empty;
         defer {
             for (flag_defs.items) |item| {
                 allocator.free(item);

@@ -24,10 +24,6 @@ docs
 src/generator/api.zig
 src/lib/tl/api.zig
 
-
-# no andrew, I don't care about the global gitignore
-.DS_Store
-
 # Devenv
 .devenv*
 devenv.local.nix
@@ -38,3 +34,5 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+zig-pkg

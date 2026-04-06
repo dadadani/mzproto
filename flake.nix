@@ -24,7 +24,7 @@
       # Other overlays
       (final: prev: rec {
         zigpkgs = inputs.zig.packages.${prev.system};
-        zig = inputs.zig.packages.${prev.system}."master-2026-03-20";
+        zig = inputs.zig.packages.${prev.system}."master-2026-04-05";
         zls = inputs.zls.packages.${prev.system}.default;
       })
     ];

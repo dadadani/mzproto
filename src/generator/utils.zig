@@ -27,7 +27,7 @@ pub fn findLayer(io: std.Io, filename: []const u8) !?i32 {
 }
 
 pub fn normalizeName(allocator: std.mem.Allocator, def: anytype, mtproto: bool) ![]u8 {
-    var list = std.ArrayList(u8){};
+    var list = std.ArrayList(u8).empty;
     defer list.deinit(allocator);
 
     if (mtproto) {
