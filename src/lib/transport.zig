@@ -1,34 +1,19 @@
-const Abridged = @import("transport/abridged.zig");
-const Stream = @import("transport/stream.zig");
-
 const std = @import("std");
 
 pub const Transports = std.meta.Tag(TransportUnion);
 
 const TransportUnion = union(enum) {
-    Stream: Stream,
-    Abridged: Abridged,
+    TcpAbridged: Transport.TcpAbridged,
 };
 
 pub const Transport = struct {
+    pub const TcpAbridged = @import("transport/tcp_abridged.zig");
+
     pub const Error = error{ LengthNotRead, LengthAlreadyConsumed } || std.Io.Writer.Error || std.Io.Reader.Error || std.Io.Cancelable;
 
     pub const Enum = std.meta.Tag(TransportUnion);
 
     transport: TransportUnion,
-
-    pub fn initStream(io: std.Io, config: Stream.Config, read_buf: []u8, write_buf: []u8) !Transport {
-        return .{ .transport = .{ .Stream = try Stream.init(io, config, read_buf, write_buf) } };
-    }
-
-    pub fn init(io: std.Io, transport_mode: Transports, transport: *Transport) Error!Transport {
-        switch (transport_mode) {
-            .Abridged => {
-                return .{ .transport = .{ .Abridged = try Abridged.init(transport, io) } };
-            },
-            .Stream => unreachable,
-        }
-    }
 
     pub fn recvLen(self: *Transport, io: std.Io) Error!usize {
         return switch (self.transport) {

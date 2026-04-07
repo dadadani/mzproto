@@ -1,5 +1,3 @@
-// broken right now, please come back later :d
-
 const std = @import("std");
 const Client = @This();
 const Storage = @import("./storage.zig").Storage;

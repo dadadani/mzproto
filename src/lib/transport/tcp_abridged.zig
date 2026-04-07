@@ -1,11 +1,13 @@
 const std = @import("std");
-const Transport = @import("../transport.zig").Transport;
+const Error = @import("../transport.zig").Transport.Error;
 
-const Abridged = @This();
+const TcpAbridged = @This();
 
 const Mode = enum { SingleByte, FullBytes, Payload };
 
-transport: *Transport,
+writer: std.Io.net.Stream.Writer,
+reader: std.Io.net.Stream.Reader,
+stream: std.Io.net.Stream,
 
 mode: Mode = .SingleByte,
 len: usize = 0,
@@ -13,23 +15,26 @@ len: usize = 0,
 mutex_read: std.Io.Mutex = .init,
 mutex_write: std.Io.Mutex = .init,
 
-pub fn init(transport: *Transport, io: std.Io) !Abridged {
-    var self = Abridged{
-        .transport = transport,
+pub fn init(io: std.Io, stream: std.Io.net.Stream, readerBuffer: []u8, writerBuffer: []u8) !TcpAbridged {
+    var self = TcpAbridged{
+        .stream = stream,
+        .reader = stream.reader(io, readerBuffer),
+        .writer = stream.writer(io, writerBuffer),
     };
-    try self.transport.write(io, &.{0xef});
-    //  try self.writer.flush();
+    try self.writer.interface.writeByte(0xef);
+    try self.writer.interface.flush();
     return self;
 }
 
-pub fn recvLen(self: *Abridged, io: std.Io) Transport.Error!usize {
+pub fn recvLen(self: *TcpAbridged, io: std.Io) !usize {
     try self.mutex_read.lock(io);
     defer self.mutex_read.unlock(io);
 
     switch (self.mode) {
         .SingleByte => {
             var lenB: [1]u8 = undefined;
-            _ = try self.transport.recv(io, &lenB);
+
+            try self.reader.interface.readSliceAll(&lenB);
             if (lenB[0] >= 127) {
                 self.mode = .FullBytes;
             } else {
@@ -43,7 +48,7 @@ pub fn recvLen(self: *Abridged, io: std.Io) Transport.Error!usize {
 
     if (self.mode == .FullBytes) {
         var len: [4]u8 = .{0} ** 4;
-        _ = try self.transport.recv(io, len[0..3]);
+        try self.reader.interface.readSliceAll(len[0..3]);
         self.len = @as(usize, std.mem.readInt(u32, &len, .little)) * 4;
         self.mode = .Payload;
     }
@@ -51,17 +56,17 @@ pub fn recvLen(self: *Abridged, io: std.Io) Transport.Error!usize {
     return self.len;
 }
 
-pub fn recv(self: *Abridged, io: std.Io, buf: []u8) Transport.Error!usize {
+pub fn recv(self: *TcpAbridged, io: std.Io, buf: []u8) !usize {
     try self.mutex_read.lock(io);
     defer self.mutex_read.unlock(io);
 
     switch (self.mode) {
         .SingleByte, .FullBytes => {
-            return Transport.Error.LengthNotRead;
+            return Error.LengthNotRead;
         },
         .Payload => {
             const len_dest = @min(buf.len, self.len);
-            _ = try self.transport.recv(io, buf[0..len_dest]);
+            try self.reader.interface.readSliceAll(buf[0..len_dest]);
             self.len -= len_dest;
             if (self.len == 0) {
                 self.mode = .SingleByte;
@@ -71,27 +76,24 @@ pub fn recv(self: *Abridged, io: std.Io, buf: []u8) Transport.Error!usize {
     }
 }
 
-pub fn write(self: *Abridged, io: std.Io, buf: []const u8) Transport.Error!void {
+pub fn write(self: *TcpAbridged, io: std.Io, buf: []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
     const len = @as(u8, @intCast(buf.len / 4));
 
     if (len < 0x7F) {
-        const l = [_]u8{len};
-        var vec = [_][]const u8{ &l, buf };
-        _ = try self.transport.writeVec(io, &vec);
-        // try self.transport.flush();
+        _ = try self.writer.interface.writeVec(&.{ &.{len}, buf });
+        try self.writer.interface.flush();
     } else {
         var buf_dest: [4]u8 = undefined;
         std.mem.writeInt(u32, &buf_dest, @as(u32, len), .little);
-        var v = [_][]const u8{ &.{0x7F}, buf_dest[0..3], buf };
-        _ = try self.transport.writeVec(io, &v);
-        //  try self.writer.flush();
+        _ = try self.writer.interface.writeVec(&.{ &.{0x7F}, buf_dest[0..3], buf });
+        try self.writer.interface.flush();
     }
 }
 
-pub fn writeVec(self: *Abridged, io: std.Io, buf: [][]const u8) Transport.Error!void {
+pub fn writeVec(self: *TcpAbridged, io: std.Io, buf: []const []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
@@ -102,21 +104,18 @@ pub fn writeVec(self: *Abridged, io: std.Io, buf: [][]const u8) Transport.Error!
     len = len / 4;
 
     if (len < 0x7F) {
-        try self.transport.write(io, &.{@intCast(len)});
-        _ = try self.transport.writeVec(io, buf);
-        // try self.writer.flush();
+        try self.writer.interface.writeByte(@intCast(len));
+        _ = try self.writer.interface.writeVec(buf);
+        try self.writer.interface.flush();
     } else {
         var buf_dest: [4]u8 = undefined;
         std.mem.writeInt(u32, &buf_dest, @as(u32, @intCast(len)), .little);
-        //  try self.writer.writeByte(0x7F);
-        // _ = try self.writer.write(buf_dest[0..3]);
-        _ = try self.transport.write(io, &.{ 0x7F, buf_dest[0], buf_dest[1], buf_dest[2] });
-
-        _ = try self.transport.writeVec(io, buf);
-        //    try self.writer.flush();
+        _ = try self.writer.interface.write(&.{ 0x7f, buf_dest[0], buf_dest[1], buf_dest[2] });
+        _ = try self.writer.interface.writeVec(buf);
+        try self.writer.interface.flush();
     }
 }
 
-pub fn deinit(self: *Abridged, io: std.Io) void {
-    self.transport.deinit(io);
+pub fn deinit(self: *TcpAbridged, io: std.Io) void {
+    self.stream.close(io);
 }

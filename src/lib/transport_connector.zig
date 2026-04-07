@@ -66,35 +66,27 @@ pub fn connectTo(self: *const TransportConnector, allocator: std.mem.Allocator, 
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
 
-        const base_transport = blk: {
+        const transport = blk: {
             switch (address) {
                 .tcp => |address_tcp| {
                     const writeBuf = try arena.allocator().alloc(u8, 1024);
                     const readBuf = try arena.allocator().alloc(u8, 1024);
 
-                    const stream = try arena.allocator().create(Transport);
+                    const stream = try address_tcp.connect(io, .{ .mode = .stream });
+                    errdefer stream.close(io);
 
-                    stream.* = try Transport.initStream(
-                        io,
-                        .{ .ip = .{ .address = address_tcp, .options = .{ .mode = .stream } } },
-                        readBuf, // TODO: add buffers
-                        writeBuf,
-                    );
-                    break :blk stream;
+                    switch (self.mode) {
+                        .Abridged => {
+                            const transport = try arena.allocator().create(Transport);
+                            transport.* = .{ .transport = .{ .TcpAbridged = try Transport.TcpAbridged.init(io, stream, readBuf, writeBuf) } };
+                            break :blk transport;
+                        },
+                    }
                 },
             }
         };
-        errdefer base_transport.deinit(io);
-
-        switch (self.mode) {
-            .Abridged => {
-                const transport = try arena.allocator().create(Transport);
-
-                transport.* = try Transport.init(io, .Abridged, base_transport);
-
-                return .{ .arena = arena, .transport = transport };
-            },
-        }
+        errdefer transport.deinit(io);
+        return .{ .arena = arena, .transport = transport };
     }
 
     return null;
