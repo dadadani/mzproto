@@ -77,7 +77,7 @@ pub fn generate_dev(init: std.process.Init) !void {
         });
     }
 
-    var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(40), .clock = .boot }) };
+    var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(300), .clock = .boot }) };
 
     try timeout.sleep(io.io());
 

@@ -144,8 +144,11 @@ shutdown: std.atomic.Value(bool) = .init(false),
 waiting_requests: std.atomic.Value(u32) = .init(0),
 shutdown_event: std.Io.Event = .unset,
 transport_connector: *TransportConnector,
+freeze_requests: std.atomic.Value(bool) = .init(false),
+freeze_event: std.Io.Event = .unset,
 
 // not thread-safe, scope specific
+wait_and_recreate_auth_key: bool = false,
 reconnect_reason: ReconnectReason = .refresh_temp_key,
 conn_restart: std.Io.Event = .unset,
 retry_backlog: std.ArrayListUnmanaged(Request) = .empty,
@@ -180,7 +183,7 @@ pub const SessionError = error{
     TransportUnknown,
 };
 
-pub const ProcessMessageError = error{ UnknownIncomingMessage, Recovered, RPCError } || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
+pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
 
 /// Generates the next sequence number for a message.
 /// Returns the seqno to use and updates the internal counter if content-related.
@@ -438,13 +441,10 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
                 _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
 
                 const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
-
+                errdefer allocator.free(buf);
                 const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
 
-                self.mutex.lock(io) catch |err_mutex| {
-                    allocator.free(buf);
-                    return err_mutex;
-                };
+                try self.mutex.lock(io);
                 defer self.mutex.unlock(io);
 
                 const req = self.pending_answers.map.getPtr(req_id) orelse {
@@ -457,12 +457,11 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
 
                     req.*.data = SendError.Resend;
                     req.*.event.set(io);
-                    return ProcessMessageError.Recovered;
+                    return;
                 }
 
                 req.*.data = .{ .ptr = buf, .alignment = .of(tl.ProtoRpcError), .data = tl.TL{ .ProtoRpcError = err } };
                 req.*.event.set(io);
-                return ProcessMessageError.RPCError;
             },
             .ProtoGzipPacked => {
                 const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
@@ -805,11 +804,47 @@ pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, tr
 const RETRY_IN = std.Io.Duration.fromMilliseconds(500);
 const timeout: std.Io.Timeout = .{ .duration = .{ .raw = RETRY_IN, .clock = .boot } };
 
-pub inline fn newTempKey(self: *Session, allocator: std.mem.Allocator, io: std.Io) !void {
-    const transport = (try self.transport_connector.connectTo(allocator, io, self.dc)).?;
-    defer transport.deinit(io);
+fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key: *?AuthKey.GeneratedAuthKey) std.Io.Cancelable!void {
+    gen_key.* = null;
+    gen_key.* = key: {
+        while (true) {
+            const transport = (self.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return std.Io.Cancelable.Canceled;
+                }
+                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                try timeout.sleep(io);
+                continue;
+            }).?;
+            defer transport.deinit(io);
 
-    const gen_key = try AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true);
+            const generated_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return std.Io.Cancelable.Canceled;
+                }
+                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                try timeout.sleep(io);
+                continue;
+            };
+
+            break :key generated_key;
+        }
+    };
+
+    self.shutdown_event.reset();
+
+    if (self.waiting_requests.load(.acquire) == 0) {
+        self.shutdown_event.set(io);
+    }
+
+    try self.shutdown_event.wait(io);
+
+    self.conn_restart.set(io);
+}
+
+fn setTempKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key: AuthKey.GeneratedAuthKey) !void {
+    //const transport = (try self.transport_connector.connectTo(allocator, io, self.dc)).?;
+    //defer transport.deinit(io);
 
     // The authorization key id is the 64 lower-bits of the SHA1 hash of the
     // authorization key
@@ -835,7 +870,29 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
     if (reconnect_reason == .refresh_temp_key) {
         log.debug("generating temp auth key - dc {}", .{self.dc});
         while (true) {
-            self.newTempKey(allocator, io) catch {
+            const transport = (self.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return std.Io.Cancelable.Canceled;
+                }
+                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                try timeout.sleep(io);
+                continue;
+            }).?;
+            defer transport.deinit(io);
+
+            const gen_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return std.Io.Cancelable.Canceled;
+                }
+                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                try timeout.sleep(io);
+                continue;
+            };
+
+            self.setTempKey(allocator, io, gen_key) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return std.Io.Cancelable.Canceled;
+                }
                 log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
@@ -991,6 +1048,8 @@ pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) 
         self.connection_bound_auth_key = true;
         self.init_ok = true;
     }
+
+    // the prebindWriterWorker will get stuck waiting for an item on the queue, so we push an empty request to make it exit the loop
     _ = self.bootstrap_queue.putOne(io, .{ .id = null, .data = @constCast(&.{}), .content_related = false }) catch |err| {
         if (err == std.Io.Cancelable.Canceled) {
             return std.Io.Cancelable.Canceled;
@@ -1000,13 +1059,19 @@ pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) 
 
 pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.Io) !void {
     var reason: ReconnectReason = self.reconnect_reason;
+    self.reconnect_reason = .none;
     while (!self.shutdown.load(.acquire)) {
         {
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
             self.init_ok = false;
         }
+        self.freeze_event.set(io);
+        self.freeze_requests.store(false, .release);
+        self.freeze_event.reset();
         const holder = try self.connectWithRetry(allocator, io, reason);
+        reason = .none;
+
 
         var group: std.Io.Group = .init;
 
@@ -1014,6 +1079,7 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
             @panic("concurrency unavailable");
         };
         if (!self.connection_bound_auth_key) {
+
             group.concurrent(io, Session.prebindWriterWorker, .{ self, io, allocator, holder.transport }) catch {
                 @panic("concurrency unavailable");
             };
@@ -1021,6 +1087,7 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
                 @panic("concurrency unavailable");
             };
         } else {
+
             group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
                 @panic("concurrency unavailable");
             };
@@ -1030,6 +1097,7 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
         };
 
         self.conn_restart.wait(io) catch {
+
             group.cancel(io);
             holder.deinit(io);
             return;
@@ -1037,12 +1105,63 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
 
         group.cancel(io);
 
-        holder.deinit(io);
-
         reason = self.reconnect_reason;
         self.reconnect_reason = .none;
-
         self.conn_restart.reset();
+
+        if (self.wait_and_recreate_auth_key and reason != .refresh_temp_key) {
+
+            // when a new auth key is generated, the session is usually cleared.
+            // to make the switch seamless, we process the remaining pending requests, and only then we switch to the new auth key
+            var auth_key: ?AuthKey.GeneratedAuthKey = null;
+
+            group = .init;
+
+            group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
+                @panic("concurrency unavailable");
+            };
+            group.concurrent(io, Session.prepareNewTempAuthKey, .{ self, allocator, io, &auth_key }) catch {
+                @panic("concurrency unavailable");
+            };
+
+            self.conn_restart.wait(io) catch {
+
+                group.cancel(io);
+                holder.deinit(io);
+                return;
+            };
+
+            const sub_reason = reason: {
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
+                break :reason self.reconnect_reason;
+            };
+
+            group.cancel(io);
+            self.conn_restart.reset();
+            self.reconnect_reason = .none;
+
+            if (sub_reason == .none) {
+                if (auth_key) |gen_key| {
+
+                    self.setTempKey(allocator, io, gen_key) catch |err| {
+
+                        if (err == std.Io.Cancelable.Canceled) {
+                            return std.Io.Cancelable.Canceled;
+                        }
+                        holder.deinit(io);
+                        self.wait_and_recreate_auth_key = false;
+                        continue;
+                    };
+                    self.reconnect_reason = .none;
+                } else {
+                }
+            }
+        }
+
+        holder.deinit(io);
+
+        self.wait_and_recreate_auth_key = false;
     }
 }
 
@@ -1248,6 +1367,15 @@ pub fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.
     // For now, I am implementing a separate worker that periodically sends PingDelayDisconnect. TODO: consider integrating pingWorker into writerWorker by using `select`
     while (true) {
         try self.ping_timeout.sleep(io);
+
+        if (std.Io.Clock.now(.boot, io).addDuration(.fromSeconds(AuthKey.TEMP_KEYS_ADVANCE_S)).withClock(.boot).compare(.gt, self.auth_key.expiration.?)) {
+            log.debug("temp auth key is about to expire, starting to generate a new one - dc {}", .{self.dc});
+            self.freeze_event.reset();
+            self.freeze_requests.store(true, .release);
+            self.wait_and_recreate_auth_key = true;
+            self.conn_restart.set(io);
+            return;
+        }
 
         self.maybeRequestFutureSalts(io, allocator);
 
@@ -1465,7 +1593,7 @@ fn prebindWriterWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator,
         };
         var batch: [MAX_WORKER_BATCH]Request = undefined;
 
-        const batch_size = self.bootstrap_queue.get(io, &batch, if (bound) 0 else 1) catch |err| {
+        var batch_size = self.bootstrap_queue.get(io, &batch, if (bound) 0 else 1) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
                 return std.Io.Cancelable.Canceled;
             }
@@ -1474,10 +1602,19 @@ fn prebindWriterWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator,
             }
             return;
         };
-
-        if (batch_size == 0 or (batch_size > 0 and batch[0].data.len == 0)) {
+        // item with data.len = 0 coming from the initConnection helper
+        if (batch_size == 0 or (batch_size == 1 and batch[0].data.len == 0)) {
             if (bound) break;
             continue;
+        }
+
+        if (bound) {
+            for (0..batch_size) |item| {
+                if (batch[item].data.len == 0) {
+                    batch_size = item;
+                    break;
+                }
+            }
         }
 
         log.debug("Processing {d} pre-bind outbound messages - dc {}", .{ batch_size, self.dc });
@@ -1531,6 +1668,10 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
         return SendError.Shutdown;
     }
 
+    if (self.freeze_requests.load(.acquire)) {
+        try self.freeze_event.wait(io);
+    }
+
     log.debug("Sending (nowait) {any} - dc {}", .{ message, self.dc });
 
     const len_serialized = message.serializeSize();
@@ -1563,6 +1704,10 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     const deserializeResult = message.getDeserializeResult() orelse return SendError.NotFunction;
     if (self.shutdown.load(.acquire)) {
         return SendError.Shutdown;
+    }
+
+    if (self.freeze_requests.load(.acquire)) {
+        try self.freeze_event.wait(io);
     }
 
     // If the session hasn't been initialized properly yet, we wrap the message with initConnection

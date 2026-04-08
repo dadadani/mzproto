@@ -11,7 +11,7 @@ const ige = @import("../crypto/ige.zig").ige;
 const RSAPublicKey = @import("../crypto/public_key_parser.zig");
 
 pub const TEMP_KEYS_EXPIRE_IN_S = 1800;
-
+pub const TEMP_KEYS_ADVANCE_S = 120;
 pub const GenError = error{
     ConnectionClosed,
     InvalidResponse,
