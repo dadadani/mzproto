@@ -2142,6 +2142,12 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
             if (kv.value.proto_container_id) |container_id| {
                 self.removeMessageFromContainer(allocator, container_id, id);
             }
+            if (kv.value.data) |data_er| {
+                const data_maybe = data_er catch null;
+                if (data_maybe) |data| {
+                    data.deinit(allocator);
+                }
+            }
             allocator.destroy(kv.value);
         }
         self.mutex.unlock(io);
@@ -2202,7 +2208,16 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         try answer.event.wait(io);
     }
 
-    if (answer.data) |data| {
+    const maybe_data = data: {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const maybe_data = answer.data;
+        answer.data = null;
+        break :data maybe_data;
+    };
+
+    if (maybe_data) |data| {
         return data catch |err| {
             if (err == SendError.Resend) {
                 log.debug("Need to resend message, id: {d} - dc {}", .{ id, self.dc });
