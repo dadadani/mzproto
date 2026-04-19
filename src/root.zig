@@ -83,7 +83,7 @@ pub fn generate_dev(init: std.process.Init) !void {
 
     try supervisor.cancel(io.io());
 
-    session.destroyRequests(io.io());
+    session.destroyRequests(allocator, io.io());
 
     session.deinit(io.io(), allocator);
 }

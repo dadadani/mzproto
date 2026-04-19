@@ -2,7 +2,7 @@
   description = "an mtproto client written in zig";
 
   inputs = {
-    nixpkgs.url = "https://channels.nixos.org/nixos-25.05/nixexprs.tar.xz";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     zig.url = "github:mitchellh/zig-overlay";
     zls.url = "github:zigtools/zls";
@@ -24,7 +24,7 @@
       # Other overlays
       (final: prev: rec {
         zigpkgs = inputs.zig.packages.${prev.system};
-        zig = inputs.zig.packages.${prev.system}."master-2026-04-07";
+        zig = inputs.zig.packages.${prev.system}."master";
         zls = inputs.zls.packages.${prev.system}.default;
       })
     ];

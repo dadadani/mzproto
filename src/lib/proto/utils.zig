@@ -145,3 +145,11 @@ pub fn encryptMessageV1(
     const derived = kdfV1(auth_key, data[offset_msg_key..offset_salt], 0);
     ige(data[offset_salt..], data[offset_salt..], &derived.key, &derived.iv, true);
 }
+
+pub fn panicDeserializeResultSize(_: []const u8, _: *usize) usize {
+    @panic("DeserializeResultSize has not been set");
+}
+
+pub fn panicDeserializeResult(noalias _: []const u8, noalias _: []u8) struct { tl.TL, usize, usize } {
+    @panic("DeserializeResult has not been set");
+}

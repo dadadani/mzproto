@@ -72,7 +72,7 @@ pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
     }
 }
 
-fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMap(std.ArrayList(constructors.TLConstructor)), cons: std.ArrayList(constructors.TLConstructor), mtproto: bool) !void {
+fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMapUnmanaged(std.ArrayList(constructors.TLConstructor)), cons: std.ArrayList(constructors.TLConstructor), mtproto: bool) !void {
     for (cons.items) |constructor| {
         if (constructor.category == .Functions) {
             continue;
@@ -91,7 +91,7 @@ fn registerBoxedMap(allocator: std.mem.Allocator, map: *std.StringArrayHashMap(s
             }
 
             if (!map.contains(name)) {
-                try map.put(name, std.ArrayList(constructors.TLConstructor).empty);
+                try map.put(allocator, name, std.ArrayList(constructors.TLConstructor).empty);
                 keep = true;
             }
 
@@ -110,14 +110,14 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, io: std.Io, filename: []co
         defs.deinit(allocator);
     }
 
-    var boxed_map = std.StringArrayHashMap(std.ArrayList(constructors.TLConstructor)).init(allocator);
+    var boxed_map = std.StringArrayHashMapUnmanaged(std.ArrayList(constructors.TLConstructor)).empty;
     defer {
         var iterator = boxed_map.iterator();
         while (iterator.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(allocator);
         }
-        boxed_map.deinit();
+        boxed_map.deinit(allocator);
     }
 
     try registerBoxedMap(allocator, &boxed_map, defs, mtproto);
