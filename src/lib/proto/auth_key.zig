@@ -1,9 +1,13 @@
 const tl = @import("../tl/api.zig");
 const std = @import("std");
-const factorize = @cImport({
-    @cInclude("pq.h");
-});
+
+extern fn pq_factor(n: u64, p: [*c]u64, q: [*c]u64) c_int;
+extern fn pq_seed(seed: u64) void;
+extern fn pq_factorize(n: u64) u64;
+
 const utils = @import("./utils.zig");
+
+const MessageID = @import("./message_id.zig");
 
 const Transport = @import("../transport.zig").Transport;
 const ige = @import("../crypto/ige.zig").ige;
@@ -105,6 +109,7 @@ const AuthGen = struct {
     transport: *Transport,
     io: std.Io,
     expiration: ?std.Io.Clock.Timestamp = null,
+    message_id: ?*MessageID,
 
     /// Sends data in plain text mode.
     ///
@@ -189,7 +194,7 @@ const AuthGen = struct {
             var q: u64 = 0;
 
             // get the primes p and q from pq
-            if (factorize.pq_factor(std.mem.readInt(u64, resPQ.pq[0..8], .big), &p, &q) != 1) {
+            if (pq_factor(std.mem.readInt(u64, resPQ.pq[0..8], .big), &p, &q) != 1) {
                 self.status = .Failed;
                 return GenError.Security;
             }
@@ -324,6 +329,10 @@ const AuthGen = struct {
         }
 
         const dhInnerData = deser.ProtoServerDHInnerData;
+        
+        if (self.message_id) |message_id| {
+            message_id.updateTime(self.io, dhInnerData.server_time);
+        }
 
         if (dhInnerData.nonce != self.nonce) {
             self.status = .Failed;
@@ -547,7 +556,7 @@ fn rsaPad(io: std.Io, src: []const u8, m: u2048, e: u64) ![256]u8 {
 }
 
 /// Starts auth key generation on the specified `transport`
-pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport, dcId: u8, media: bool, test_mode: bool, temp_key: bool) !GeneratedAuthKey {
+pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport, dcId: u8, media: bool, test_mode: bool, temp_key: bool, message_id: ?*MessageID) !GeneratedAuthKey {
     var self = AuthGen{
         .allocator = allocator,
         .dc_id = dcId,
@@ -556,6 +565,7 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport,
         .test_mode = test_mode,
         .temp_key = temp_key,
         .io = io,
+        .message_id = message_id,
     };
     const req_pq = try self.reqPQ();
     defer req_pq.deinit(allocator);

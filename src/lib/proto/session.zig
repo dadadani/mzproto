@@ -699,6 +699,16 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
     }
 }
 
+inline fn handleFutureSalt(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
+    var buf: [@sizeOf(tl.ProtoFutureSalt)]u8 align(@alignOf(tl.ProtoFutureSalt)) = undefined;
+    const future_salt, _, _ = tl.ProtoFutureSalt.deserialize(message.body[4..], &buf);
+
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
+    try self.salts.append(allocator, future_salt.*);
+}
+
 fn handleFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     var len: usize = 0;
     _ = tl.ProtoFutureSalts.deserializeSize(message.body[4..], &len);
@@ -878,6 +888,15 @@ inline fn handleMsgsAllInfo(self: *Session, allocator: std.mem.Allocator, io: st
     return self.pushStateInfo(allocator, io, all_info.msg_ids, all_info.info);
 }
 
+inline fn handlePing(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.ProtoMessage) ProcessMessageError!void {
+    var buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
+    const ping, _, _ = tl.ProtoPing.deserialize(message.body[4..], &buf);
+
+    log.debug("Received ping request from server, ping_id: {}, msg_id: {} - dc {}", .{ ping.ping_id, message.msg_id, self.dc });
+
+    self.sendNoWait(io, allocator, tl.TL{ .ProtoPong = &.{ .ping_id = ping.ping_id, .msg_id = message.msg_id } }, null, false) catch {};
+}
+
 fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
     //const allocator = self.arena.allocator();
 
@@ -891,8 +910,10 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             .ProtoMsgsAck => try self.handleMsgsAck(allocator, io, message),
             .ProtoBadMsgNotification, .ProtoBadServerSalt => try self.handleBadNotification(io, allocator, message),
             .ProtoMsgDetailedInfo, .ProtoMsgNewDetailedInfo => try self.handleNewDetailedInfo(io, allocator, message),
+            .ProtoFutureSalt => try self.handleFutureSalt(io, allocator, message),
             .ProtoFutureSalts => try self.handleFutureSalts(io, allocator, message),
             .ProtoPong => try self.handlePong(io, allocator, message),
+            .ProtoPing => try self.handlePing(allocator, io, message),
             .ProtoMessageContainer => try self.handleMessageContainer(io, allocator, message),
             .ProtoMsgsAllInfo => try self.handleMsgsAllInfo(allocator, io, message),
             .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
@@ -1014,7 +1035,7 @@ fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.I
             }).?;
             defer transport.deinit(io);
 
-            const generated_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true) catch |err| {
+            const generated_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true, &self.message_id) catch |err| {
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
@@ -1076,7 +1097,7 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
             }).?;
             defer transport.deinit(io);
 
-            const gen_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true) catch |err| {
+            const gen_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true, &self.message_id) catch |err| {
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
@@ -1299,7 +1320,7 @@ pub fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, i
     }
 }
 
-pub fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, reconnect: bool) !void {
+pub fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, comptime reconnect: bool) !void {
     try self.auth_key_bound_event.wait(io);
     // sleep a bit, telegram might send something back automatically
     const DURATION = std.Io.Duration.fromMilliseconds(900);
@@ -2394,6 +2415,7 @@ pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector
     log.info("Initializing session - dc {}", .{dc});
     self.* = Session{
         .dc = dc,
+        // time is automatically synced with the server during auth key gen
         .message_id = .{},
         .seq_no = 0,
         .salts = .empty,
@@ -2426,10 +2448,6 @@ pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector
     var auth_key_id: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(&self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
-
-    // Update the message_id time with the system host's time.
-    // We use this one as the "best guess", if we receive a bad_msg_notification, then we synchronize it with the expected time
-    self.message_id.updateTime(io, @intCast((std.Io.Clock.now(.real, io)).toSeconds()));
 
     self.ping_timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io, .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(PING_WRITE_INTERVAL_SECS), .clock = .boot }) };
 }

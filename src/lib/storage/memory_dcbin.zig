@@ -18,7 +18,9 @@ fn write(self: *MemoryDcBinStorage, io: std.Io) Error!void {
         return Error.WriteError;
     };
 
-    writer.interface.writeInt(i32, self.preferred_dc, .little);
+    writer.interface.writeInt(i32, self.preferred_dc, .little) catch {
+        return Error.WriteError;
+    };
 
     writer.interface.writeInt(u16, @intCast(self.datacenters.size), .little) catch {
         return Error.WriteError;

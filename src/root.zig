@@ -50,7 +50,7 @@ pub fn generate_dev(init: std.process.Init) !void {
         const conn = (try connector.connectTo(allocator, io.io(), dc)).?;
         defer conn.deinit(io.io());
 
-        const auth_key = try AuthKey.generate(allocator, io.io(), conn.transport, @intCast(dc.id), dc.media, dc.testmode, false);
+        const auth_key = try AuthKey.generate(allocator, io.io(), conn.transport, @intCast(dc.id), dc.media, dc.testmode, false, null);
         std.debug.print("perm_key ok\n", .{});
 
         break :blk auth_key;
