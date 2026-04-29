@@ -33,6 +33,37 @@ pub const GeneratedAuthKey = struct {
     expiration: ?std.Io.Clock.Timestamp,
 };
 
+const log = std.log.scoped(.mzproto_authkey);
+
+const DH_PRIME_STANDARD = std.mem.readInt(u2048, &[_]u8{ 0xC7, 0x1C, 0xAE, 0xB9, 0xC6, 0xB1, 0xC9, 0x04, 0x8E, 0x6C, 0x52, 0x2F, 0x70, 0xF1, 0x3F, 0x73, 0x98, 0x0D, 0x40, 0x23, 0x8E, 0x3E, 0x21, 0xC1, 0x49, 0x34, 0xD0, 0x37, 0x56, 0x3D, 0x93, 0x0F, 0x48, 0x19, 0x8A, 0x0A, 0xA7, 0xC1, 0x40, 0x58, 0x22, 0x94, 0x93, 0xD2, 0x25, 0x30, 0xF4, 0xDB, 0xFA, 0x33, 0x6F, 0x6E, 0x0A, 0xC9, 0x25, 0x13, 0x95, 0x43, 0xAE, 0xD4, 0x4C, 0xCE, 0x7C, 0x37, 0x20, 0xFD, 0x51, 0xF6, 0x94, 0x58, 0x70, 0x5A, 0xC6, 0x8C, 0xD4, 0xFE, 0x6B, 0x6B, 0x13, 0xAB, 0xDC, 0x97, 0x46, 0x51, 0x29, 0x69, 0x32, 0x84, 0x54, 0xF1, 0x8F, 0xAF, 0x8C, 0x59, 0x5F, 0x64, 0x24, 0x77, 0xFE, 0x96, 0xBB, 0x2A, 0x94, 0x1D, 0x5B, 0xCD, 0x1D, 0x4A, 0xC8, 0xCC, 0x49, 0x88, 0x07, 0x08, 0xFA, 0x9B, 0x37, 0x8E, 0x3C, 0x4F, 0x3A, 0x90, 0x60, 0xBE, 0xE6, 0x7C, 0xF9, 0xA4, 0xA4, 0xA6, 0x95, 0x81, 0x10, 0x51, 0x90, 0x7E, 0x16, 0x27, 0x53, 0xB5, 0x6B, 0x0F, 0x6B, 0x41, 0x0D, 0xBA, 0x74, 0xD8, 0xA8, 0x4B, 0x2A, 0x14, 0xB3, 0x14, 0x4E, 0x0E, 0xF1, 0x28, 0x47, 0x54, 0xFD, 0x17, 0xED, 0x95, 0x0D, 0x59, 0x65, 0xB4, 0xB9, 0xDD, 0x46, 0x58, 0x2D, 0xB1, 0x17, 0x8D, 0x16, 0x9C, 0x6B, 0xC4, 0x65, 0xB0, 0xD6, 0xFF, 0x9C, 0xA3, 0x92, 0x8F, 0xEF, 0x5B, 0x9A, 0xE4, 0xE4, 0x18, 0xFC, 0x15, 0xE8, 0x3E, 0xBE, 0xA0, 0xF8, 0x7F, 0xA9, 0xFF, 0x5E, 0xED, 0x70, 0x05, 0x0D, 0xED, 0x28, 0x49, 0xF4, 0x7B, 0xF9, 0x59, 0xD9, 0x56, 0x85, 0x0C, 0xE9, 0x29, 0x85, 0x1F, 0x0D, 0x81, 0x15, 0xF6, 0x35, 0xB1, 0x05, 0xEE, 0x2E, 0x4E, 0x15, 0xD0, 0x4B, 0x24, 0x54, 0xBF, 0x6F, 0x4F, 0xAD, 0xF0, 0x34, 0xB1, 0x04, 0x03, 0x11, 0x9C, 0xD8, 0xE3, 0xB9, 0x2F, 0xCC, 0x5B }, .big);
+
+inline fn validateDhPrime(p: u2048, g: u32) bool {
+    // Client is expected to check whether p = dh_prime is a safe 2048-bit prime
+    // (meaning that both p and (p-1)/2 are prime, and that 2^2047 < p < 2^2048),
+    // and that g generates a cyclic subgroup of prime order (p-1)/2,
+    // i.e. is a quadratic residue mod p.
+    if (p <= (@as(u4096, 1) << 2047)) return false;
+    if (p >= (@as(u4096, 1) << 2048) - 1) return false;
+
+    if ((p & 1) == 0) return false;
+
+    switch (g) {
+        2 => if (p % 8 != 7) return false,
+        3 => if (p % 3 != 2) return false,
+        4 => {},
+        5 => if (!(p % 5 == 1 or p % 5 == 4)) return false,
+        6 => if (!(p % 24 == 19 or p % 24 == 23)) return false,
+        7 => if (!(p % 7 == 3 or p % 7 == 5 or p % 7 == 6)) return false,
+        else => return false,
+    }
+
+    if (p == DH_PRIME_STANDARD) return true;
+
+    // TODO: check if dh_prime is prime. we don't have libraries ready right now for that
+
+    return true;
+}
+
 fn defaultKeys() []const RSAPublicKey {
 
     // Since the keys are already known, we can parse them at compile time. I love optimizations like these!!!!!!
@@ -139,11 +170,13 @@ const AuthGen = struct {
 
         if (d.data != .ProtoResPQ) {
             self.status = .Failed;
+            log.err("received data is not ProtoResPQ", .{});
             return GenError.FailedResPQ;
         }
         const resPQ = d.data.ProtoResPQ;
         if (resPQ.nonce != self.nonce) {
             self.status = .Failed;
+            log.err("the received resPQ.nonce is not the same as the stored one", .{});
             return GenError.Security;
         }
         self.server_nonce = resPQ.server_nonce;
@@ -187,6 +220,7 @@ const AuthGen = struct {
 
             if (self.public_key == null) {
                 self.status = .Failed;
+                log.err("No known key fingerprints to use", .{});
                 return GenError.UnknownFingerprints;
             }
 
@@ -196,6 +230,7 @@ const AuthGen = struct {
             // get the primes p and q from pq
             if (pq_factor(std.mem.readInt(u64, resPQ.pq[0..8], .big), &p, &q) != 1) {
                 self.status = .Failed;
+                log.err("Factors failed to generate", .{});
                 return GenError.Security;
             }
 
@@ -251,6 +286,7 @@ const AuthGen = struct {
 
             if (d.data != .ProtoServerDHParamsOk) {
                 self.status = .Failed;
+                log.err("The response is not .ProtoServerDHParamsOk", .{});
                 return GenError.FailedReqDH;
             }
 
@@ -258,11 +294,13 @@ const AuthGen = struct {
 
             if (dhParamsOk.nonce != self.nonce) {
                 self.status = .Failed;
+                log.err("The received dhParamsOk.nonce is not the same as the stored one", .{});
                 return GenError.Security;
             }
 
             if (dhParamsOk.server_nonce != self.server_nonce) {
                 self.status = .Failed;
+                log.err("The received dhParamsOk.server_nonce is not the same as the stored one", .{});
                 return GenError.Security;
             }
 
@@ -312,7 +350,16 @@ const AuthGen = struct {
 
             var size: usize = 0;
 
-            _ = tl.TL.deserializeSize(dhParamsOk.encrypted_answer[20..], &size);
+            const answer_len = tl.TL.deserializeSize(dhParamsOk.encrypted_answer[20..], &size);
+
+            {
+                var computed_hash: [20]u8 = undefined;
+                std.crypto.hash.Sha1.hash(dhParamsOk.encrypted_answer[20 .. 20 + answer_len], &computed_hash, .{});
+                if (!std.mem.eql(u8, &computed_hash, dhParamsOk.encrypted_answer[0..20])) {
+                    log.err("dhParamsOk.encrypted_answer doesn't match the computed hash", .{});
+                    return GenError.Security;
+                }
+            }
 
             const buf_deser = try self.allocator.alloc(u8, size);
             errdefer self.allocator.free(buf_deser);
@@ -325,28 +372,36 @@ const AuthGen = struct {
 
         if (deser != .ProtoServerDHInnerData) {
             self.status = .Failed;
+            log.err("the response is not ProtoServerDHInnerData", .{});
             return GenError.FailedReqDH;
         }
 
         const dhInnerData = deser.ProtoServerDHInnerData;
-        
+
         if (self.message_id) |message_id| {
             message_id.updateTime(self.io, dhInnerData.server_time);
         }
 
         if (dhInnerData.nonce != self.nonce) {
             self.status = .Failed;
+            log.err("the received dhInnerData.nonce is not the same as the stored one", .{});
             return GenError.Security;
         }
 
         if (dhInnerData.server_nonce != self.server_nonce) {
             self.status = .Failed;
+            log.err("the received dhInnerData.server_nonce is not the same as the stored one", .{});
             return GenError.Security;
         }
 
         self.dh_prime = std.mem.readInt(u2048, dhInnerData.dh_prime[0..256], .big);
         self.gA = std.mem.readInt(u2048, dhInnerData.g_a[0..256], .big);
         try std.Io.randomSecure(self.io, @ptrCast(&self.b));
+
+        if (!validateDhPrime(self.dh_prime, dhInnerData.g)) {
+            log.err("dh_prime failed validation", .{});
+            return GenError.Security;
+        }
 
         var m = try Modulus.fromPrimitive(u2048, self.dh_prime);
 
@@ -429,13 +484,23 @@ const AuthGen = struct {
         const d = try self.recvData();
         defer d.deinit(self.allocator);
         switch (d.data) {
-            .ProtoDhGenOk => {
+            .ProtoDhGenOk => |dh_gen_ok| {
                 var result = GeneratedAuthKey{
                     .auth_key = undefined,
                     .first_salt = 0,
                     .expiration = self.expiration,
                 };
-                // TODO: maybe optimize this
+
+                if (dh_gen_ok.nonce != self.nonce) {
+                    log.err("dh_gen_ok.nonce doesn't match stored nonce", .{});
+                    return GenError.Security;
+                }
+
+                if (dh_gen_ok.server_nonce != self.server_nonce) {
+                    log.err("dh_gen_ok.server_nonce doesn't match stored server_nonce", .{});
+                    return GenError.Security;
+                }
+
                 var newNonce: [32]u8 = undefined;
                 var serverNonce: [16]u8 = undefined;
                 std.mem.writeInt(u256, &newNonce, self.new_nonce, .little);
@@ -464,8 +529,9 @@ const AuthGen = struct {
 
                 const computed_hash = std.mem.readInt(u128, hash2[4..], .little);
 
-                if (computed_hash != d.data.ProtoDhGenOk.new_nonce_hash1) {
+                if (computed_hash != dh_gen_ok.new_nonce_hash1) {
                     self.status = .Failed;
+                    log.err("the computed hash doesn't match new_nonce_hash1", .{});
                     return GenError.Security;
                 }
 
@@ -475,10 +541,12 @@ const AuthGen = struct {
             .ProtoDhGenRetry => {
                 // TODO: retry
                 self.status = .Failed;
+                log.err("Received ProtoDhGenRetry", .{});
                 return GenError.InvalidResponse;
             },
             else => {
                 self.status = .Failed;
+                log.err("Received an invalid response", .{});
                 return GenError.InvalidResponse;
             },
         }
@@ -489,6 +557,7 @@ const Modulus = std.crypto.ff.Modulus(2048);
 
 inline fn rangeCheck(val: u2048, min: u2048, max: u2048) !void {
     if (!(min < val and val < max)) {
+        log.err("rangeCheck failed", .{});
         return GenError.Security;
     }
 }
