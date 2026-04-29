@@ -3,11 +3,11 @@ const std = @import("std");
 pub const Transports = std.meta.Tag(TransportUnion);
 
 const TransportUnion = union(enum) {
-    TcpAbridged: Transport.TcpAbridged,
+    Streamridged: Transport.StreamAbridged,
 };
 
 pub const Transport = struct {
-    pub const TcpAbridged = @import("transport/tcp_abridged.zig");
+    pub const StreamAbridged = @import("transport/stream_abridged.zig");
 
     pub const Error = error{ LengthNotRead, LengthAlreadyConsumed } || std.Io.Writer.Error || std.Io.Reader.Error || std.Io.Cancelable;
 

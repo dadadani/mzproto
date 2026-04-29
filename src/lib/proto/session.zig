@@ -72,6 +72,7 @@ const AcknowledgmentStatus = enum {
 };
 
 fn requestReconnect(self: *Session, io: std.Io, reason: ReconnectReason) void {
+    log.debug("reconnection requested ({any}) {f}", .{ reason, self.dc });
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
 
@@ -288,7 +289,7 @@ fn maybeRequestFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Alloca
         self.requesting_salts = true;
     }
 
-    log.debug("Requesting more salts - dc {}", .{self.dc});
+    log.debug("Requesting more salts - {f}", .{self.dc});
 
     self.sendNoWait(io, allocator, tl.TL{ .ProtoGetFutureSalts = &.{ .num = SALTS_TO_OBTAIN } }, null, false) catch {
         self.mutex.lockUncancelable(io);
@@ -372,7 +373,7 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
             // incorrect server salt (in this case, the bad_server_salt response is received with
             // the correct salt, and the message is to be re-sent with it)
             .ProtoBadServerSalt => |x| {
-                log.warn("got ProtoBadServerSalt - dc {}", .{self.dc});
+                log.warn("got ProtoBadServerSalt - {f}", .{self.dc});
                 if (self.salts.items.len == 0) {
                     try self.salts.append(allocator, .{
                         .salt = x.new_server_salt,
@@ -397,57 +398,57 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
                     // and re-send the original message with the “correct” msg_id or wrap it in a
                     // container with a new msg_id if the original message had waited too long on the client to be transmitted)
                     16 => {
-                        log.warn("got ProtoBadMsgNotification, msg_id too low - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, msg_id too low - {f}", .{self.dc});
                         self.message_id.updateTime(io, message.msg_id >> 32);
                     },
                     // msg_id too high (similar to the previous case, the client time has to be synchronized,
                     // and the message re-sent with the correct msg_id)
                     17 => {
-                        log.warn("got ProtoBadMsgNotification, msg_id too high - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, msg_id too high - {f}", .{self.dc});
                         self.message_id.updateTime(io, message.msg_id >> 32);
                     },
                     // incorrect two lower order msg_id bits (the server expects client message msg_id to be divisible by 4)
                     18 => {
                         // an error like that should never happen, but you never know...
-                        log.warn("got ProtoBadMsgNotification, incorrect two lower order msg_id bits - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, incorrect two lower order msg_id bits - {f}", .{self.dc});
                         self.message_id.updateTime(io, message.msg_id >> 32);
                     },
                     // container msg_id is the same as msg_id of a previously received message (this must never happen)
                     19 => {
                         // what should I even do with an error like that?
-                        log.warn("got ProtoBadMsgNotification, container msg_id is the same as msg_id of a previously received message - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, container msg_id is the same as msg_id of a previously received message - {f}", .{self.dc});
                     },
                     // message too old, and it cannot be verified whether the server has received a message with this msg_id or not
                     20 => {
-                        log.warn("got ProtoBadMsgNotification, message too old, and it cannot be verified whether the server has received a message with this msg_id or not - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, message too old, and it cannot be verified whether the server has received a message with this msg_id or not - {f}", .{self.dc});
                     },
                     // msg_seqno too low (the server has already received a message with a lower msg_id but with either
                     // a higher or an equal and odd seqno)
                     32 => {
-                        log.warn("got ProtoBadMsgNotification, msg_seqno too low - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, msg_seqno too low - {f}", .{self.dc});
                         self.seq_no += 64;
                     },
                     // msg_seqno too high (similarly, there is a message
                     // with a higher msg_id but with either a lower or an equal and odd seqno)
                     33 => {
-                        log.warn("got ProtoBadMsgNotification, msg_seqno too high  -dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, msg_seqno too high  -{f}", .{self.dc});
                         self.seq_no -= 16;
                     },
                     // an even msg_seqno expected (irrelevant message), but odd received
                     34 => {
-                        log.warn("got ProtoBadMsgNotification, an even msg_seqno expected, but odd received - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, an even msg_seqno expected, but odd received - {f}", .{self.dc});
                     },
                     // odd msg_seqno expected (relevant message), but even received
                     35 => {
-                        log.warn("got ProtoBadMsgNotification, odd msg_seqno expected, but even received - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, odd msg_seqno expected, but even received - {f}", .{self.dc});
                     },
                     // invalid container.
                     64 => {
                         // very descriptive. Thanks, Telegram!
-                        log.warn("got ProtoBadMsgNotification, invalid container - dc {}", .{self.dc});
+                        log.warn("got ProtoBadMsgNotification, invalid container - {f}", .{self.dc});
                     },
                     else => {
-                        log.warn("got ProtoBadMsgNotification, unknown code {d} - dc {}", .{ x.error_code, self.dc });
+                        log.warn("got ProtoBadMsgNotification, unknown code {d} - {f}", .{ x.error_code, self.dc });
                     },
                 }
                 break :brk x.bad_msg_id;
@@ -507,20 +508,20 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
 
         const req_id = self.pending_answers_idmap.get(rpc_result.req_msg_id) orelse {
             // TODO: do something?
-            log.warn("Received unmapped RPC Result {d} - dc {}", .{ rpc_result.req_msg_id, self.dc });
+            log.warn("Received unmapped RPC Result {d} - {f}", .{ rpc_result.req_msg_id, self.dc });
             return;
         };
 
         const req = self.pending_answers.map.getPtr(req_id) orelse {
             // TODO: do something?
-            log.warn("Received unmapped RPC Result {d}->{d} - dc {}", .{ rpc_result.req_msg_id, req_id, self.dc });
+            log.warn("Received unmapped RPC Result {d}->{d} - {f}", .{ rpc_result.req_msg_id, req_id, self.dc });
             return;
         };
 
         break :blk .{ req_id, req.*.deserializeResultSize, req.*.deserializeResult };
     };
 
-    log.debug("Received RPC Result, {d}->{d} - dc {}", .{ rpc_result.req_msg_id, req_id, self.dc });
+    log.debug("Received RPC Result, {d}->{d} - {f}", .{ rpc_result.req_msg_id, req_id, self.dc });
 
     const id = std.mem.readInt(u32, rpc_result.body[0..4], .little);
     if (tl.TL.identify(id)) |ty| {
@@ -663,7 +664,7 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
 
     const msg_detailed, _, _ = tl.IProtoMsgDetailedInfo.deserialize(message.body, &buf);
 
-    log.debug("Received ProtoMsgDetailedInfo - dc {}", .{self.dc});
+    log.debug("Received ProtoMsgDetailedInfo - {f}", .{self.dc});
 
     // TODO: check this in detail, we might want to handle things differently
 
@@ -731,7 +732,7 @@ fn handleFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, m
 
     try self.salts.appendSlice(allocator, salts.salts);
 
-    log.debug("Added {d} salts - dc {}", .{ salts.salts.len, self.dc });
+    log.debug("Added {d} salts - {f}", .{ salts.salts.len, self.dc });
 
     const req_id = self.pending_answers_idmap.get(salts.req_msg_id) orelse {
         // TODO: do something?
@@ -763,7 +764,7 @@ fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message:
     const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoPong), @sizeOf(tl.ProtoPong));
 
     const pong, _, _ = tl.ProtoPong.deserialize(message.body[4..], buf);
-    log.debug("Received pong, ping_id: {} - dc {}", .{ pong.ping_id, self.dc });
+    log.debug("Received pong, ping_id: {} - {f}", .{ pong.ping_id, self.dc });
 
     self.mutex.lock(io) catch |err| {
         allocator.free(buf);
@@ -825,7 +826,7 @@ fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Alloca
     var buf: [@sizeOf(tl.ProtoNewSessionCreated)]u8 align(@alignOf(tl.ProtoNewSessionCreated)) = undefined;
     const new_session, _, _ = tl.ProtoNewSessionCreated.deserialize(message.body[4..], &buf);
 
-    log.debug("NewSessionCreated received from server, first_msg_id: {} - dc {}", .{ new_session.first_msg_id, self.dc });
+    log.debug("NewSessionCreated received from server, first_msg_id: {} - {f}", .{ new_session.first_msg_id, self.dc });
 
     {
         try self.mutex.lock(io);
@@ -892,7 +893,7 @@ inline fn handlePing(self: *Session, allocator: std.mem.Allocator, io: std.Io, m
     var buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
     const ping, _, _ = tl.ProtoPing.deserialize(message.body[4..], &buf);
 
-    log.debug("Received ping request from server, ping_id: {}, msg_id: {} - dc {}", .{ ping.ping_id, message.msg_id, self.dc });
+    log.debug("Received ping request from server, ping_id: {}, msg_id: {} - {f}", .{ ping.ping_id, message.msg_id, self.dc });
 
     self.sendNoWait(io, allocator, tl.TL{ .ProtoPong = &.{ .ping_id = ping.ping_id, .msg_id = message.msg_id } }, null, false) catch {};
 }
@@ -934,7 +935,7 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
     }
 }
 
-pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) std.Io.Cancelable!void {
+fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) std.Io.Cancelable!void {
     while (true) {
         const len = transport.recvLen(io) catch {
             self.requestReconnect(io, .reconnect_only);
@@ -949,7 +950,7 @@ pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, tr
 
         if (buf.len == 4) {
             const code = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
-            log.err("Received transport error {} - dc {}", .{ code, self.dc });
+            log.err("Received transport error {} - {f}", .{ code, self.dc });
 
             if (code == 404) {
                 //return SessionError.Transport404;
@@ -965,7 +966,7 @@ pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, tr
         };
 
         self.decryptMessage(io, buf) catch |err| {
-            log.err("failed to decrypt message ({s}) - dc {}", .{ @errorName(err), self.dc });
+            log.err("failed to decrypt message ({s}) - {f}", .{ @errorName(err), self.dc });
             self.requestReconnect(io, .refresh_temp_key);
             return;
         };
@@ -1008,7 +1009,7 @@ pub fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, tr
 
         self.stored_msg_ids.push(message.msg_id);
 
-        log.debug("Incoming message, type {any} - dc {}", .{ tl.TL.identify(std.mem.readInt(u32, @ptrCast(message.body[0..4]), .little)), self.dc });
+        log.debug("Incoming message, type {any} - {f}", .{ tl.TL.identify(std.mem.readInt(u32, @ptrCast(message.body[0..4]), .little)), self.dc });
 
         self.processMessage(io, allocator, message) catch {
 
@@ -1029,7 +1030,7 @@ fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.I
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
             }).?;
@@ -1039,7 +1040,7 @@ fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.I
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
             };
@@ -1083,15 +1084,15 @@ fn setTempKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key:
     }
 }
 
-pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, reconnect_reason: ReconnectReason) std.Io.Cancelable!TransportConnector.TransportHolder {
+fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, reconnect_reason: ReconnectReason) std.Io.Cancelable!TransportConnector.TransportHolder {
     if (reconnect_reason == .refresh_temp_key) {
-        log.debug("generating temp auth key - dc {}", .{self.dc});
+        log.debug("generating temp auth key - {f}", .{self.dc});
         while (true) {
             const transport = (self.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
             }).?;
@@ -1101,7 +1102,7 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
             };
@@ -1110,7 +1111,7 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - dc {}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
                 try timeout.sleep(io);
                 continue;
             };
@@ -1119,8 +1120,9 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
     }
 
     while (true) {
+        log.debug("connecting to datacenter {f}", .{self.dc});
         const transport = self.transport_connector.connectTo(allocator, io, self.dc) catch {
-            log.err("unable to connect - dc {}", .{self.dc});
+            log.err("unable to connect - {f}", .{self.dc});
             try timeout.sleep(io);
             continue;
         };
@@ -1128,7 +1130,7 @@ pub fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io
     }
 }
 
-pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
+fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
     {
         var nonce: u64 = undefined;
         std.Io.randomSecure(io, @ptrCast(&nonce)) catch {
@@ -1217,7 +1219,7 @@ pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) 
         if (init_data.data == .ProtoRpcError) {
             const err = init_data.data.ProtoRpcError.error_message;
 
-            log.err("Unable to bind temporary auth key to permanent auth key: {s} - dc {}", .{ err, self.dc });
+            log.err("Unable to bind temporary auth key to permanent auth key: {s} - {f}", .{ err, self.dc });
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         }
@@ -1251,7 +1253,7 @@ pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) 
 
         if (init_data.data == .ProtoRpcError) {
             const err = init_data.data.ProtoRpcError.error_message;
-            log.err("Unable to initConnection: {s} - dc {}", .{ err, self.dc });
+            log.err("Unable to initConnection: {s} - {f}", .{ err, self.dc });
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         }
@@ -1274,7 +1276,7 @@ pub fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) 
     };
 }
 
-pub fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, id_messages: []const u64, data: []const u8) std.Io.Cancelable!void {
+fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, id_messages: []const u64, data: []const u8) std.Io.Cancelable!void {
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
@@ -1320,7 +1322,7 @@ pub fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, i
     }
 }
 
-pub fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, comptime reconnect: bool) !void {
+fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, comptime reconnect: bool) !void {
     try self.auth_key_bound_event.wait(io);
     // sleep a bit, telegram might send something back automatically
     const DURATION = std.Io.Duration.fromMilliseconds(900);
@@ -1371,13 +1373,13 @@ pub fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io,
     }
 }
 
-pub fn checkMessagesStatus(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
+fn checkMessagesStatus(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
     while (true) {
         self.reqMessageState(allocator, io, true) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
                 return std.Io.Cancelable.Canceled;
             }
-            log.err("Failed to request state of messages: {any}, retrying - dc {}", .{ err, self.dc });
+            log.err("Failed to request state of messages: {any}, retrying - {f}", .{ err, self.dc });
             try timeout.sleep(io);
             continue;
         };
@@ -1388,7 +1390,7 @@ pub fn checkMessagesStatus(self: *Session, allocator: std.mem.Allocator, io: std
 pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
     var reason: ReconnectReason = self.reconnect_reason;
     self.reconnect_reason = .none;
-    log.info("Starting supervisor - dc {}", .{self.dc});
+    log.info("Starting supervisor - {f}", .{self.dc});
     while (!self.shutdown.load(.acquire)) {
         {
             try self.mutex.lock(io);
@@ -1693,13 +1695,13 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
     @memcpy(out[offset_data..offset_padding], requests[0].data);
 }
 
-pub fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.Cancelable!void {
+fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.Cancelable!void {
     // For now, I am implementing a separate worker that periodically sends PingDelayDisconnect. TODO: consider integrating pingWorker into writerWorker by using `select`
     while (true) {
         try self.ping_timeout.sleep(io);
 
         if (std.Io.Clock.now(.boot, io).addDuration(.fromSeconds(AuthKey.TEMP_KEYS_ADVANCE_S)).withClock(.boot).compare(.gt, self.auth_key.expiration.?)) {
-            log.debug("temp auth key is about to expire, starting to generate a new one - dc {}", .{self.dc});
+            log.debug("temp auth key is about to expire, starting to generate a new one - {f}", .{self.dc});
             self.freeze_event.reset();
             self.freeze_requests.store(true, .release);
             self.wait_and_recreate_auth_key = true;
@@ -1713,7 +1715,7 @@ pub fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.
             try self.mutex.lock(io);
 
             if (self.ping_disconnect) {
-                log.debug("no pong received for more than {d} seconds, disconnecting - dc {}", .{ PING_WRITE_INTERVAL_SECS * 2, self.dc });
+                log.debug("no pong received for more than {d} seconds, disconnecting - {f}", .{ PING_WRITE_INTERVAL_SECS * 2, self.dc });
                 self.mutex.unlock(io);
                 self.requestReconnect(io, .reconnect_only);
                 return;
@@ -1726,7 +1728,7 @@ pub fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.
             break :brk self.ping_value;
         };
 
-        log.debug("sending PingDelayDisconnect, id: {d} - dc {}", .{ ping_id, self.dc });
+        log.debug("sending PingDelayDisconnect, id: {d} - {f}", .{ ping_id, self.dc });
 
         self.sendNoWait(io, allocator, tl.TL{ .ProtoPingDelayDisconnect = &.{ .ping_id = ping_id, .disconnect_delay = PING_WRITE_INTERVAL_SECS * 2 } }, null, false) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
@@ -1859,7 +1861,7 @@ inline fn processBatch(self: *Session, allocator: std.mem.Allocator, io: std.Io,
 
     defer {
         if (!ok) {
-            log.err("failed to send messages, requeuing - dc {}", .{self.dc});
+            log.err("failed to send messages, requeuing - {f}", .{self.dc});
             self.retry_backlog.appendSliceAssumeCapacity(batch);
         } else {
             for (batch) |req| {
@@ -2029,7 +2031,7 @@ fn prebindWriterWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator,
             }
         }
 
-        log.debug("Processing {d} pre-bind outbound messages - dc {}", .{ batch_size, self.dc });
+        log.debug("Processing {d} pre-bind outbound messages - {f}", .{ batch_size, self.dc });
 
         self.prebindProcessBatch(allocator, io, transport, batch[0..batch_size]) catch {
             self.requestReconnect(io, .reconnect_only);
@@ -2064,7 +2066,7 @@ fn writerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
             return;
         };
 
-        log.debug("Processing {d} outbound messages - dc {}", .{ batch_size, self.dc });
+        log.debug("Processing {d} outbound messages - {f}", .{ batch_size, self.dc });
         self.processBatch(allocator, io, transport, batch[0..batch_size]) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
                 return;
@@ -2084,7 +2086,7 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
         try self.freeze_event.wait(io);
     }
 
-    log.debug("Sending (nowait) {any} - dc {}", .{ message, self.dc });
+    log.debug("Sending (nowait) {any} - {f}", .{ message, self.dc });
 
     const len_serialized = message.serializeSize();
 
@@ -2174,7 +2176,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         self.mutex.unlock(io);
     }
 
-    log.debug("Sending {any}, id: {d} - dc {}", .{ message_to_send, id, self.dc });
+    log.debug("Sending {any}, id: {d} - {f}", .{ message_to_send, id, self.dc });
 
     const answer = answ: {
         const buf = try allocator.alloc(u8, len_serialized);
@@ -2230,7 +2232,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     }
 
     const maybe_data = data: {
-        self.mutex.lockUncancelable(io);
+        try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
         const maybe_data = answer.data;
@@ -2241,7 +2243,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     if (maybe_data) |data| {
         return data catch |err| {
             if (err == SendError.Resend) {
-                log.debug("Need to resend message, id: {d} - dc {}", .{ id, self.dc });
+                log.debug("Need to resend message, id: {d} - {f}", .{ id, self.dc });
                 return self.send(io, allocator, message, null, prebind);
             }
             return err;
@@ -2412,7 +2414,7 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
 }
 
 pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector, client_info: *ClientInfo, auth_key: [256]u8, dc: DcId) !void {
-    log.info("Initializing session - dc {}", .{dc});
+    log.info("Initializing session - {f}", .{dc});
     self.* = Session{
         .dc = dc,
         // time is automatically synced with the server during auth key gen

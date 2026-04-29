@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const DcId = packed struct(i32) {
-    id: u29,
+    id: u8,
+    _: u21 = 0,
     testmode: bool = false,
     valid: bool = true, // used in storage backends to make sure the preferred dc is set, keep always true
     media: bool = false,
@@ -13,17 +14,16 @@ pub const DcId = packed struct(i32) {
         self: DcId,
         writer: *std.Io.Writer,
     ) !void {
-        writer.print("[dc{s}", .{self.id});
+        try writer.print("[dc{d}", .{self.id});
         if (self.testmode) {
-            writer.write(" testmode");
+            _ = try writer.write(" testmode");
         }
         if (self.media) {
-            writer.write(" media");
+            _ = try writer.write(" media");
         }
 
-        writer.write("]");
+        _ = try writer.write("]");
 
-        writer.flush();
+        try writer.flush();
     }
 };
-

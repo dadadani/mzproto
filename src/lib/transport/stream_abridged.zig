@@ -1,7 +1,7 @@
 const std = @import("std");
 const Error = @import("../transport.zig").Transport.Error;
 
-const TcpAbridged = @This();
+const StreamAbridged = @This();
 
 const Mode = enum { SingleByte, FullBytes, Payload };
 
@@ -15,8 +15,8 @@ len: usize = 0,
 mutex_read: std.Io.Mutex = .init,
 mutex_write: std.Io.Mutex = .init,
 
-pub fn init(io: std.Io, stream: std.Io.net.Stream, readerBuffer: []u8, writerBuffer: []u8) !TcpAbridged {
-    var self = TcpAbridged{
+pub fn init(io: std.Io, stream: std.Io.net.Stream, readerBuffer: []u8, writerBuffer: []u8) !StreamAbridged {
+    var self = StreamAbridged{
         .stream = stream,
         .reader = stream.reader(io, readerBuffer),
         .writer = stream.writer(io, writerBuffer),
@@ -26,7 +26,7 @@ pub fn init(io: std.Io, stream: std.Io.net.Stream, readerBuffer: []u8, writerBuf
     return self;
 }
 
-pub fn recvLen(self: *TcpAbridged, io: std.Io) !usize {
+pub fn recvLen(self: *StreamAbridged, io: std.Io) !usize {
     try self.mutex_read.lock(io);
     defer self.mutex_read.unlock(io);
 
@@ -56,7 +56,7 @@ pub fn recvLen(self: *TcpAbridged, io: std.Io) !usize {
     return self.len;
 }
 
-pub fn recv(self: *TcpAbridged, io: std.Io, buf: []u8) !usize {
+pub fn recv(self: *StreamAbridged, io: std.Io, buf: []u8) !usize {
     try self.mutex_read.lock(io);
     defer self.mutex_read.unlock(io);
 
@@ -76,7 +76,7 @@ pub fn recv(self: *TcpAbridged, io: std.Io, buf: []u8) !usize {
     }
 }
 
-pub fn write(self: *TcpAbridged, io: std.Io, buf: []const u8) !void {
+pub fn write(self: *StreamAbridged, io: std.Io, buf: []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
@@ -93,7 +93,7 @@ pub fn write(self: *TcpAbridged, io: std.Io, buf: []const u8) !void {
     }
 }
 
-pub fn writeVec(self: *TcpAbridged, io: std.Io, buf: []const []const u8) !void {
+pub fn writeVec(self: *StreamAbridged, io: std.Io, buf: []const []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
@@ -116,6 +116,6 @@ pub fn writeVec(self: *TcpAbridged, io: std.Io, buf: []const []const u8) !void {
     }
 }
 
-pub fn deinit(self: *TcpAbridged, io: std.Io) void {
+pub fn deinit(self: *StreamAbridged, io: std.Io) void {
     self.stream.close(io);
 }
