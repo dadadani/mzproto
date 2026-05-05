@@ -112,7 +112,7 @@ seq_no: usize,
 salts: std.ArrayList(tl.ProtoFutureSalt),
 requesting_salts: bool = false,
 
-stored_msg_ids: utils.Ring(u64, MSG_ID_CHECK_SET_SIZE) = .{ .buf = .{0} ** MSG_ID_CHECK_SET_SIZE },
+stored_msg_ids: utils.Ring(u64, MSG_ID_CHECK_SET_SIZE) = .{ .buf = @splat(0) },
 
 pending_ack: std.ArrayList(u64),
 pending_ack_inflight: usize = 0,

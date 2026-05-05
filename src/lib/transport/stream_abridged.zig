@@ -47,7 +47,7 @@ pub fn recvLen(self: *StreamAbridged, io: std.Io) !usize {
     }
 
     if (self.mode == .FullBytes) {
-        var len: [4]u8 = .{0} ** 4;
+        var len: [4]u8 = @splat(4);
         try self.reader.interface.readSliceAll(len[0..3]);
         self.len = @as(usize, std.mem.readInt(u32, &len, .little)) * 4;
         self.mode = .Payload;

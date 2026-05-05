@@ -584,7 +584,7 @@ fn rsaPad(io: std.Io, src: []const u8, m: u2048, e: u64) ![256]u8 {
 
     {
         const data_with_hash = result[32..];
-        const zeroIv = [_]u8{0} ** 32;
+        const zeroIv: [32]u8 = @splat(0);
         ige(data_with_hash, data_with_hash, &temp_key, &zeroIv, true);
 
         std.crypto.hash.sha2.Sha256.hash(data_with_hash, result[0..32], .{});

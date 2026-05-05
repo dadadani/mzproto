@@ -45,7 +45,7 @@ pub fn ige(src: []const u8, dest: []u8, key: *const [32]u8, iv: *const [32]u8, c
 
 test "ige encryption & decryption" {
     const text = "helloworldasfsdf";
-    var dest = [_]u8{0} ** text.len;
+    var dest: [text.len]u8 = @splat(0);
 
     var key: [32]u8 = undefined;
     var iv: [32]u8 = undefined;
