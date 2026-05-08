@@ -2,6 +2,10 @@ const std = @import("std");
 const buildzon = @import("./build.zig.zon");
 
 pub fn build_mzproto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite: *std.Build.Dependency, enable_sqlite: bool) *std.Build.Module {
+    var options = b.addOptions();
+    options.addOption([]const u8, "VERSION", buildzon.version);
+    options.addOption(bool, "ENABLE_SQLITE", enable_sqlite);
+
     const mod = b.addModule("mzproto", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -9,17 +13,9 @@ pub fn build_mzproto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
 
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite.module("sqlite") },
+            .{ .name = "mzproto_options", .module = options.createModule() },
         },
     });
-
-    var options = b.addOptions();
-    options.addOption([]const u8, "VERSION", buildzon.version);
-    options.addOption(bool, "ENABLE_SQLITE", enable_sqlite);
-
-    mod.addOptions(
-        "mzproto_options",
-        options,
-    );
 
     mod.addIncludePath(b.path("./src/lib/crypto/"));
     mod.addCSourceFile(.{

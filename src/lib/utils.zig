@@ -1,7 +1,8 @@
 const std = @import("std");
 pub const DcId = packed struct(i32) {
     id: u8,
-    _: u21 = 0,
+    _: u20 = 0,
+    cdn: bool = false,
     testmode: bool = false,
     valid: bool = true, // used in storage backends to make sure the preferred dc is set, keep always true
     media: bool = false,
@@ -21,7 +22,9 @@ pub const DcId = packed struct(i32) {
         if (self.media) {
             _ = try writer.write(" media");
         }
-
+        if (self.cdn) {
+            _ = try writer.write(" cdn");
+        }
         _ = try writer.write("]");
 
         try writer.flush();

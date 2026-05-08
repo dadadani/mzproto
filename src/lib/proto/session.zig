@@ -9,9 +9,9 @@ const deserializeStringNoCopy = @import("../tl/base.zig").deserializeStringNoCop
 const TransportConnector = @import("../transport_connector.zig");
 const DcId = @import("../utils.zig").DcId;
 const AuthKey = @import("./auth_key.zig");
-const ClientInfo = @import("../client_info.zig");
+const ClientManager = @import("../client_manager.zig");
 
-const QUEUE_SIZE = 60;
+const QUEUE_SIZE = 20;
 const SALT_THRESHOLD = 15;
 const SALTS_TO_OBTAIN = 64;
 const MAX_WORKER_BATCH = 10;
@@ -72,6 +72,9 @@ const AcknowledgmentStatus = enum {
 };
 
 fn requestReconnect(self: *Session, io: std.Io, reason: ReconnectReason) void {
+    if (self.shutdown.load(.acquire)) {
+        return;
+    }
     log.debug("reconnection requested ({any}) {f}", .{ reason, self.dc });
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
@@ -154,9 +157,8 @@ requests_queue: std.Io.Queue(Request),
 bootstrap_queue: std.Io.Queue(Request),
 current_id: std.atomic.Value(u32) = .init(0),
 shutdown: std.atomic.Value(bool) = .init(false),
-waiting_requests: std.atomic.Value(u32) = .init(0),
+pending_requests: std.atomic.Value(u32) = .init(0),
 shutdown_event: std.Io.Event = .unset,
-transport_connector: *TransportConnector,
 freeze_requests: std.atomic.Value(bool) = .init(false),
 freeze_event: std.Io.Event = .unset,
 auth_key_bound_event: std.Io.Event = .unset,
@@ -166,12 +168,13 @@ wait_and_recreate_auth_key: bool = false,
 reconnect_reason: ReconnectReason = .refresh_temp_key,
 conn_restart: std.Io.Event = .unset,
 retry_backlog: std.ArrayListUnmanaged(Request) = .empty,
-client_info: *ClientInfo,
+client_manager: *ClientManager,
 
 // Not specifically thread-safe, but they will not change for the entire lifecycle of the session
 dc: DcId,
-perm_auth_key: [256]u8,
+perm_auth_key: *const [256]u8,
 perm_auth_key_id: [8]u8,
+id: u32,
 
 pub const SendError = error{
     Resend, // Happens when we receive a message like bad_msg_notification, shouldn't be returned
@@ -198,6 +201,23 @@ pub const SessionError = error{
 };
 
 pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
+
+pub fn format(
+    self: Session,
+    writer: *std.Io.Writer,
+) !void {
+    try writer.print("[session {d} - dc{d}", .{ self.id, self.dc.id });
+    if (self.testmode) {
+        _ = try writer.write(" testmode");
+    }
+    if (self.media) {
+        _ = try writer.write(" media");
+    }
+
+    _ = try writer.write("]");
+
+    try writer.flush();
+}
 
 /// The mutex is assumed to be already acquired.
 fn removeMessageFromContainer(self: *Session, allocator: std.mem.Allocator, container_id: u64, id: u64) void {
@@ -938,6 +958,9 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
 fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) std.Io.Cancelable!void {
     while (true) {
         const len = transport.recvLen(io) catch {
+            std.Io.checkCancel(io) catch {
+                return;
+            };
             self.requestReconnect(io, .reconnect_only);
             return;
         };
@@ -961,11 +984,17 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
         }
 
         _ = transport.recv(io, buf) catch {
+            std.Io.checkCancel(io) catch {
+                return;
+            };
             self.requestReconnect(io, .reconnect_only);
             return;
         };
 
         self.decryptMessage(io, buf) catch |err| {
+            std.Io.checkCancel(io) catch {
+                return;
+            };
             log.err("failed to decrypt message ({s}) - {f}", .{ @errorName(err), self.dc });
             self.requestReconnect(io, .refresh_temp_key);
             return;
@@ -1022,36 +1051,38 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
 const RETRY_IN = std.Io.Duration.fromMilliseconds(500);
 const timeout: std.Io.Timeout = .{ .duration = .{ .raw = RETRY_IN, .clock = .boot } };
 
-fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key: *?AuthKey.GeneratedAuthKey) std.Io.Cancelable!void {
-    gen_key.* = null;
-    gen_key.* = key: {
-        while (true) {
-            const transport = (self.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
-                if (err == std.Io.Cancelable.Canceled) {
-                    return std.Io.Cancelable.Canceled;
-                }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
-                try timeout.sleep(io);
-                continue;
-            }).?;
-            defer transport.deinit(io);
+fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key: *?AuthKey.GeneratedAuthKey, shutdown: bool) std.Io.Cancelable!void {
+    if (!shutdown) {
+        gen_key.* = null;
+        gen_key.* = key: {
+            while (true) {
+                const transport = (self.client_manager.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
+                    if (err == std.Io.Cancelable.Canceled) {
+                        return std.Io.Cancelable.Canceled;
+                    }
+                    log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                    try timeout.sleep(io);
+                    continue;
+                }).?;
+                defer transport.deinit(io);
 
-            const generated_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true, &self.message_id) catch |err| {
-                if (err == std.Io.Cancelable.Canceled) {
-                    return std.Io.Cancelable.Canceled;
-                }
-                log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
-                try timeout.sleep(io);
-                continue;
-            };
+                const generated_key = AuthKey.generate(allocator, io, transport.transport, @intCast(self.dc.id), self.dc.media, self.dc.testmode, true, &self.message_id) catch |err| {
+                    if (err == std.Io.Cancelable.Canceled) {
+                        return std.Io.Cancelable.Canceled;
+                    }
+                    log.warn("failed to generate temp auth key, retrying in {d}ms - {f}", .{ RETRY_IN.toMilliseconds(), self.dc });
+                    try timeout.sleep(io);
+                    continue;
+                };
 
-            break :key generated_key;
-        }
-    };
+                break :key generated_key;
+            }
+        };
+    }
 
     self.shutdown_event.reset();
 
-    if (self.waiting_requests.load(.acquire) == 0) {
+    if (self.pending_requests.load(.acquire) == 0) {
         self.shutdown_event.set(io);
     }
 
@@ -1088,7 +1119,7 @@ fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, re
     if (reconnect_reason == .refresh_temp_key) {
         log.debug("generating temp auth key - {f}", .{self.dc});
         while (true) {
-            const transport = (self.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
+            const transport = (self.client_manager.transport_connector.connectTo(allocator, io, self.dc) catch |err| {
                 if (err == std.Io.Cancelable.Canceled) {
                     return std.Io.Cancelable.Canceled;
                 }
@@ -1121,7 +1152,7 @@ fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, re
 
     while (true) {
         log.debug("connecting to datacenter {f}", .{self.dc});
-        const transport = self.transport_connector.connectTo(allocator, io, self.dc) catch {
+        const transport = self.client_manager.transport_connector.connectTo(allocator, io, self.dc) catch {
             log.err("unable to connect - {f}", .{self.dc});
             try timeout.sleep(io);
             continue;
@@ -1133,7 +1164,10 @@ fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, re
 fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
     {
         var nonce: u64 = undefined;
-        std.Io.randomSecure(io, @ptrCast(&nonce)) catch {
+        std.Io.randomSecure(io, @ptrCast(&nonce)) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         };
@@ -1163,11 +1197,17 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
 
         var bind_salt: u64 = undefined;
         var bind_session_id: u64 = undefined;
-        std.Io.randomSecure(io, std.mem.asBytes(&bind_salt)) catch {
+        std.Io.randomSecure(io, std.mem.asBytes(&bind_salt)) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         };
-        std.Io.randomSecure(io, std.mem.asBytes(&bind_session_id)) catch {
+        std.Io.randomSecure(io, std.mem.asBytes(&bind_session_id)) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         };
@@ -1176,43 +1216,55 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
             io,
             &encrypted_message,
             &self.perm_auth_key_id,
-            &self.perm_auth_key,
+            self.perm_auth_key,
             bind_salt,
             bind_session_id,
             msg_id,
             0,
             message_size,
-        ) catch {
+        ) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         };
-
-        const init_data = self.send(io, allocator, tl.TL{
-            .InvokeWithLayer = &.{
-                .layer = tl.LAYER_VERSION,
-                .query = tl.TL{
-                    .InitConnection = &.{
-                        .api_id = self.client_info.api_id,
-                        .device_model = self.client_info.device_model,
-                        .system_version = self.client_info.system_version,
-                        .app_version = self.client_info.app_version,
-                        .system_lang_code = self.client_info.system_lang_code,
-                        .lang_pack = self.client_info.lang_pack,
-                        .lang_code = self.client_info.lang_code,
-                        .query = .{
-                            .AuthBindTempAuthKey = &.{
-                                .perm_auth_key_id = perm_key_id_u64,
-                                .nonce = nonce,
-                                .expires_at = @intCast(expires_at),
-                                .encrypted_message = &encrypted_message,
+        const init_data = blk: {
+            try self.client_manager.session_info.lock.lockShared(io);
+            defer self.client_manager.session_info.lock.unlockShared(io);
+            const message = tl.TL{
+                .InvokeWithLayer = &.{
+                    .layer = tl.LAYER_VERSION,
+                    .query = tl.TL{
+                        .InitConnection = &.{
+                            .api_id = self.client_manager.session_info.api_id,
+                            .device_model = self.client_manager.session_info.device_model,
+                            .system_version = self.client_manager.session_info.system_version,
+                            .app_version = self.client_manager.session_info.app_version,
+                            .system_lang_code = self.client_manager.session_info.system_lang_code,
+                            .lang_pack = self.client_manager.session_info.lang_pack,
+                            .lang_code = self.client_manager.session_info.lang_code,
+                            .query = .{
+                                .AuthBindTempAuthKey = &.{
+                                    .perm_auth_key_id = perm_key_id_u64,
+                                    .nonce = nonce,
+                                    .expires_at = @intCast(expires_at),
+                                    .encrypted_message = &encrypted_message,
+                                },
                             },
                         },
                     },
                 },
-            },
-        }, msg_id, true) catch {
-            self.requestReconnect(io, .reconnect_only);
-            return std.Io.Cancelable.Canceled;
+            };
+            std.debug.print("messageeeeeeee: {any}\n", .{message.InvokeWithLayer.query.InitConnection});
+
+            break :blk (self.send(io, allocator, message, msg_id, true) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return;
+                }
+                self.requestReconnect(io, .reconnect_only);
+                return std.Io.Cancelable.Canceled;
+            });
         };
         defer init_data.deinit(allocator);
 
@@ -1227,26 +1279,33 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
 
     {
         // initConnection must also be called after each auth.bindTempAuthKey.
+        const init_data = blk: {
+            try self.client_manager.session_info.lock.lockShared(io);
+            defer self.client_manager.session_info.lock.unlockShared(io);
 
-        const init_data = self.send(io, allocator, tl.TL{
-            .InvokeWithLayer = &.{
-                .layer = tl.LAYER_VERSION,
-                .query = tl.TL{
-                    .InitConnection = &.{
-                        .api_id = self.client_info.api_id,
-                        .device_model = self.client_info.device_model,
-                        .system_version = self.client_info.system_version,
-                        .app_version = self.client_info.app_version,
-                        .system_lang_code = self.client_info.system_lang_code,
-                        .lang_pack = self.client_info.lang_pack,
-                        .lang_code = self.client_info.lang_code,
-                        .query = .{ .HelpGetConfig = &.{} },
+            break :blk (self.send(io, allocator, tl.TL{
+                .InvokeWithLayer = &.{
+                    .layer = tl.LAYER_VERSION,
+                    .query = tl.TL{
+                        .InitConnection = &.{
+                            .api_id = self.client_manager.session_info.api_id,
+                            .device_model = self.client_manager.session_info.device_model,
+                            .system_version = self.client_manager.session_info.system_version,
+                            .app_version = self.client_manager.session_info.app_version,
+                            .system_lang_code = self.client_manager.session_info.system_lang_code,
+                            .lang_pack = self.client_manager.session_info.lang_pack,
+                            .lang_code = self.client_manager.session_info.lang_code,
+                            .query = .{ .HelpGetConfig = &.{} },
+                        },
                     },
                 },
-            },
-        }, null, true) catch {
-            self.requestReconnect(io, .reconnect_only);
-            return std.Io.Cancelable.Canceled;
+            }, null, true) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    return;
+                }
+                self.requestReconnect(io, .reconnect_only);
+                return std.Io.Cancelable.Canceled;
+            });
         };
 
         defer init_data.deinit(allocator);
@@ -1257,7 +1316,11 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         }
-
+        if (init_data.data == .Config) {
+            self.client_manager.importConfig(allocator, io, init_data.data.Config) catch |err| {
+                log.warn("{f} failed to import tl.Config: {}", .{ self.dc, err });
+            };
+        }
         // TODO: use the config to load things like available datacenters
     }
     {
@@ -1441,7 +1504,8 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
         self.reconnect_reason = .none;
         self.conn_restart.reset();
 
-        if (self.wait_and_recreate_auth_key and reason != .refresh_temp_key) {
+        const shutdown = self.shutdown.load(.acquire);
+        if ((shutdown or self.wait_and_recreate_auth_key) and reason != .refresh_temp_key) {
 
             // when a new auth key is generated, the session is usually cleared.
             // to make the switch seamless, we process the remaining pending requests, and only then we switch to the new auth key
@@ -1452,7 +1516,10 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
             group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
                 @panic("concurrency unavailable");
             };
-            group.concurrent(io, Session.prepareNewTempAuthKey, .{ self, allocator, io, &auth_key }) catch {
+            group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
+                @panic("concurrency unavailable");
+            };
+            group.concurrent(io, Session.prepareNewTempAuthKey, .{ self, allocator, io, &auth_key, shutdown }) catch {
                 @panic("concurrency unavailable");
             };
 
@@ -1472,7 +1539,7 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
             self.conn_restart.reset();
             self.reconnect_reason = .none;
 
-            if (sub_reason == .none) {
+            if (!shutdown and sub_reason == .none) {
                 if (auth_key) |gen_key| {
                     self.setTempKey(allocator, io, gen_key) catch |err| {
                         if (err == std.Io.Cancelable.Canceled) {
@@ -1702,10 +1769,19 @@ fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.C
 
         if (std.Io.Clock.now(.boot, io).addDuration(.fromSeconds(AuthKey.TEMP_KEYS_ADVANCE_S)).withClock(.boot).compare(.gt, self.auth_key.expiration.?)) {
             log.debug("temp auth key is about to expire, starting to generate a new one - {f}", .{self.dc});
-            self.freeze_event.reset();
-            self.freeze_requests.store(true, .release);
-            self.wait_and_recreate_auth_key = true;
-            self.conn_restart.set(io);
+            {
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
+
+                if (self.shutdown.load(.acquire)) {
+                    return;
+                }
+
+                self.freeze_event.reset();
+                self.freeze_requests.store(true, .release);
+                self.wait_and_recreate_auth_key = true;
+                self.conn_restart.set(io);
+            }
             return;
         }
 
@@ -1920,6 +1996,9 @@ inline fn processBatch(self: *Session, allocator: std.mem.Allocator, io: std.Io,
     }
 
     transport.write(io, buf) catch {
+        std.Io.checkCancel(io) catch {
+            return;
+        };
         self.requestReconnect(io, .reconnect_only);
         // We set ok to true because data might still have been written. once the connection is established again, we'll check for them
         ok = true;
@@ -2033,7 +2112,10 @@ fn prebindWriterWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator,
 
         log.debug("Processing {d} pre-bind outbound messages - {f}", .{ batch_size, self.dc });
 
-        self.prebindProcessBatch(allocator, io, transport, batch[0..batch_size]) catch {
+        self.prebindProcessBatch(allocator, io, transport, batch[0..batch_size]) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         };
@@ -2086,6 +2168,18 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
         try self.freeze_event.wait(io);
     }
 
+    if (self.shutdown.load(.acquire)) {
+        return SendError.Shutdown;
+    }
+
+    _ = self.pending_requests.fetchAdd(1, .seq_cst);
+    defer {
+        const sub = self.pending_requests.fetchSub(1, .seq_cst);
+        if (sub == 1) {
+            self.shutdown_event.set(io);
+        }
+    }
+
     log.debug("Sending (nowait) {any} - {f}", .{ message, self.dc });
 
     const len_serialized = message.serializeSize();
@@ -2124,6 +2218,18 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         try self.freeze_event.wait(io);
     }
 
+    if (self.shutdown.load(.acquire)) {
+        return SendError.Shutdown;
+    }
+
+    _ = self.pending_requests.fetchAdd(1, .seq_cst);
+    defer {
+        const sub = self.pending_requests.fetchSub(1, .seq_cst);
+        if (sub == 1) {
+            self.shutdown_event.set(io);
+        }
+    }
+
     // If the session hasn't been initialized properly yet, we wrap the message with initConnection
     const message_to_send, const bootstrap_queue = blk: {
         try self.mutex.lock(io);
@@ -2132,18 +2238,21 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
             break :blk .{ message, true };
         }
         if (!self.init_ok) {
+            try self.client_manager.session_info.lock.lockShared(io);
+            self.client_manager.session_info.lock.unlockShared(io);
+
             break :blk .{ tl.TL{
                 .InvokeWithLayer = &.{
                     .layer = tl.LAYER_VERSION,
                     .query = tl.TL{
                         .InitConnection = &.{
-                            .api_id = self.client_info.api_id,
-                            .device_model = self.client_info.device_model,
-                            .system_version = self.client_info.system_version,
-                            .app_version = self.client_info.app_version,
-                            .system_lang_code = self.client_info.system_lang_code,
-                            .lang_pack = self.client_info.lang_pack,
-                            .lang_code = self.client_info.lang_code,
+                            .api_id = self.client_manager.session_info.api_id,
+                            .device_model = self.client_manager.session_info.device_model,
+                            .system_version = self.client_manager.session_info.system_version,
+                            .app_version = self.client_manager.session_info.app_version,
+                            .system_lang_code = self.client_manager.session_info.system_lang_code,
+                            .lang_pack = self.client_manager.session_info.lang_pack,
+                            .lang_code = self.client_manager.session_info.lang_code,
                             .query = message,
                         },
                     },
@@ -2218,14 +2327,6 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     }
 
     {
-        _ = self.waiting_requests.fetchAdd(1, .seq_cst);
-        defer {
-            const sub = self.waiting_requests.fetchSub(1, .seq_cst);
-            if (sub == 1) {
-                self.shutdown_event.set(io);
-            }
-        }
-
         // TODO: add a timeout, so we can send something like `msg_resend_req`/`msgs_state_req` if we don't get an answer after some time
         // TODO: add full cancellation support by sending `rpc_drop_answer`. probably won't be implemented soon
         try answer.event.wait(io);
@@ -2319,35 +2420,65 @@ fn encryptMessage(self: *Session, io: std.Io, data: []u8, seqno: usize, message_
     ige(data[offset_salt .. offset_padding + padding], data[offset_salt .. offset_padding + padding], &key, &iv, true);
 }
 
-/// Signals all pending requests and prevents new ones.
+/// Executes a graceful shutdown, so that all the pending requests are processed before terminating the connection.
 ///
-/// This does not deinit the map because callers might still be waiting on `req.event`.
-/// Call `deinit` after all waiters have returned.
-pub fn destroyRequests(self: *Session, allocator: std.mem.Allocator, io: std.Io) void {
-    self.mutex.lockUncancelable(io);
-    self.shutdown.store(true, .release);
-    self.shutdown_event.reset();
+/// Waits for all the requests to be processed, and prevents new messages from being sent.
+pub fn gracefulShutdown(self: *Session, io: std.Io) void {
+    {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-    var it = self.pending_answers.map.iterator();
-    while (it.next()) |pending_answer| {
-        pending_answer.value_ptr.*.data = SendError.Shutdown;
-        if (pending_answer.value_ptr.*.proto_container_id) |container_id| {
-            self.removeMessageFromContainer(allocator, container_id, pending_answer.key_ptr.*);
+        if (self.shutdown.load(.acquire)) {
+            return;
         }
+        self.shutdown.store(true, .release);
+        self.freeze_requests.store(false, .release);
+        self.conn_restart.set(io);
 
-        pending_answer.value_ptr.*.event.set(io);
+        self.shutdown_event.reset();
     }
-
-    if (self.waiting_requests.load(.acquire) == 0) {
+    if (self.pending_requests.load(.acquire) == 0) {
         self.shutdown_event.set(io);
     }
-    self.mutex.unlock(io);
+
+    self.shutdown_event.waitUncancelable(io);
+}
+
+/// Signals all pending requests and prevents new ones.
+///
+/// Call `deinit` after this function returns.
+pub fn destroyRequests(self: *Session, allocator: std.mem.Allocator, io: std.Io) void {
+    {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        self.shutdown.store(true, .release);
+        self.shutdown_event.reset();
+
+        self.freeze_requests.store(false, .release);
+
+        var it = self.pending_answers.map.iterator();
+        while (it.next()) |pending_answer| {
+            pending_answer.value_ptr.*.data = SendError.Shutdown;
+            if (pending_answer.value_ptr.*.proto_container_id) |container_id| {
+                self.removeMessageFromContainer(allocator, container_id, pending_answer.key_ptr.*);
+            }
+
+            pending_answer.value_ptr.*.event.set(io);
+        }
+
+        if (self.pending_requests.load(.acquire) == 0) {
+            self.shutdown_event.set(io);
+        }
+    }
 
     self.shutdown_event.waitUncancelable(io);
 }
 
 /// Before calling this function, make sure no worker is running and to have deleted every event in `pending_requests` (use `destroyRequests` for that)
 pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
+    self.shutdown.store(true, .release);
+
     // keep the mutex always locked, since this session shouldn't be used ever again
     self.mutex.lockUncancelable(io);
     while (true) {
@@ -2413,7 +2544,7 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
     self.pending_answers.map.deinit(allocator);
 }
 
-pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector, client_info: *ClientInfo, auth_key: [256]u8, dc: DcId) !void {
+pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key: *const [256]u8, dc: DcId, id: u8) !void {
     log.info("Initializing session - {f}", .{dc});
     self.* = Session{
         .dc = dc,
@@ -2431,7 +2562,7 @@ pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector
         },
         .current_id = .init(0),
         .shutdown = .init(false),
-        .waiting_requests = .init(0),
+        .pending_requests = .init(0),
         .pending_containers = .empty,
         .shutdown_event = .unset,
         .mutex = .init,
@@ -2439,8 +2570,8 @@ pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector
         .requests_queue = .init(&self.requests_queue_buffer),
         .bootstrap_queue = .init(&.{}),
         .requests_queue_buffer = undefined,
-        .transport_connector = transport_connector,
-        .client_info = client_info,
+        .client_manager = client_manager,
+        .id = id,
     };
 
     try std.Io.randomSecure(io, @ptrCast(&self.session_id));
@@ -2448,7 +2579,7 @@ pub fn init(self: *Session, io: std.Io, transport_connector: *TransportConnector
     // The authorization key id is the 64 lower-bits of the SHA1 hash of the
     // authorization key
     var auth_key_id: [20]u8 = undefined;
-    std.crypto.hash.Sha1.hash(&self.perm_auth_key, &auth_key_id, .{});
+    std.crypto.hash.Sha1.hash(self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
 
     self.ping_timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io, .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(PING_WRITE_INTERVAL_SECS), .clock = .boot }) };

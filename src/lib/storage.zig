@@ -15,7 +15,7 @@ pub const Storage = union(enum) {
 
     MemoryDcBinStorage: MemoryDcBinStorage,
 
-    fn init(allocator: std.mem.Allocator, io: std.Io, mode: Enum, dst: []const u8) Error!Storage {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, mode: Enum, dst: []const u8) Error!Storage {
         switch (mode) {
             .MemoryDcBinStorage => {
                 return .{ .MemoryDcBinStorage = try MemoryDcBinStorage.init(allocator, io, dst) };
@@ -29,7 +29,7 @@ pub const Storage = union(enum) {
         }
 
         switch (self.*) {
-            inline else => |x| {
+            inline else => |*x| {
                 return x.putDC(allocator, io, id.int(), key);
             },
         }
@@ -41,18 +41,18 @@ pub const Storage = union(enum) {
         }
 
         switch (self.*) {
-            inline else => |x| {
+            inline else => |*x| {
                 return x.getDC(io, id.int());
             },
         }
     }
 
-    pub fn getPreferredDC(self: *Storage) ?utils.DcId {
+    pub fn getPreferredDC(self: *Storage, io: std.Io) !?utils.DcId {
         const dc_id_int = switch (self.*) {
-            inline else => |x| x.getPreferredDC(),
+            inline else => |*x| x.getPreferredDC(io),
         };
 
-        const dc_id: utils.DcId = @bitCast(dc_id_int);
+        const dc_id: utils.DcId = @bitCast(try dc_id_int);
 
         if (!dc_id.valid) {
             return null;
@@ -70,9 +70,9 @@ pub const Storage = union(enum) {
         }
     }
 
-    pub fn deinit(self: *Storage, allocator: std.mem.Allocator, io: std.Io) Error!void {
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator, io: std.Io) void {
         switch (self.*) {
-            inline else => |x| {
+            inline else => |*x| {
                 x.deinit(allocator, io);
             },
         }

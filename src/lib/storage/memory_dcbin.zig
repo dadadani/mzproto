@@ -112,7 +112,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, dst: []const u8) Error!Mem
     };
 }
 
-pub fn getPreferredDC(self: *const MemoryDcBinStorage, io: std.Io) void {
+pub fn getPreferredDC(self: *MemoryDcBinStorage, io: std.Io) !i32 {
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 

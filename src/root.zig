@@ -6,8 +6,10 @@ const Transport = @import("./lib/transport.zig").Transport;
 const utils = @import("./lib/proto/utils.zig");
 const CompileOptions = @import("mzproto_options");
 const AuthKey = @import("./lib/proto/auth_key.zig");
-const ClientInfo = @import("./lib/client_info.zig");
+const ClientManager = @import("./lib/client_manager.zig");
+const Client = @import("./lib/client.zig");
 const Session = @import("./lib/proto/session.zig");
+const SessionPool = @import("./lib/proto/session_pool.zig");
 
 const Storage = @import("./lib/storage.zig");
 
@@ -29,12 +31,37 @@ pub fn generate_dev(init: std.process.Init) !void {
     var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
     defer io.deinit();
 
+    const client = try Client.init(allocator, io.io(), &.{
+        .api_id = 3,
+        .api_hash = "a",
+
+        .testmode = true,
+        .storage_dst = "/tmp/mzproto.db",
+    });
+    var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(10), .clock = .boot }) };
+
+    try timeout.sleep(io.io());
+
+    client.deinit(allocator, io.io());
+}
+
+pub fn generate_dev1(init: std.process.Init) !void {
+    //  var allocator = std.heap.DebugAllocator(.{}){};
+    //  defer {
+    //    const ok = allocator.deinit();
+    //  std.debug.print("dealloc: {any}", .{ok});
+    //  }
+
+    const allocator = init.gpa;
+    var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
+    defer io.deinit();
+
     var connector = try TransportConnector.init(allocator, .tcp, .Abridged);
     defer connector.deinit(allocator);
 
-    const dc = connector.pickFirstDc(true);
+    const dc = connector.pickFirstDc(io, true);
 
-    var client_info = ClientInfo{
+    var client_manager = ClientManager{
         .api_id = 3,
         .api_hash = "a",
         .device_model = "Samsung Galaxy J5",
@@ -49,6 +76,7 @@ pub fn generate_dev(init: std.process.Init) !void {
         std.debug.print("generating perm_key\n", .{});
         const conn = (try connector.connectTo(allocator, io.io(), dc)).?;
         defer conn.deinit(io.io());
+        std.log.debug("perm_key connected\n", .{});
 
         const auth_key = try AuthKey.generate(allocator, io.io(), conn.transport, @intCast(dc.id), dc.media, dc.testmode, false, null);
         std.debug.print("perm_key ok\n", .{});
@@ -58,9 +86,9 @@ pub fn generate_dev(init: std.process.Init) !void {
 
     var session: Session = undefined;
 
-    try session.init(io.io(), &connector, &client_info, auth_key.auth_key, dc);
+    try session.init(io.io(), &client_manager, auth_key.auth_key, dc);
 
-    var supervisor = try io.io().concurrent(Session.sessionSupervisor, .{ &session, allocator, io.io() });
+    var supervisor = try io.io().concurrent(Session.sessionSupervisor, .{ &session, allocator, io.io(), &connector });
 
     var msg_config_fut = try io.io().concurrent(Session.send, .{ &session, io.io(), allocator, tl.TL{ .HelpGetConfig = &.{} }, null, false });
     const msg_config_maybe = msg_config_fut.await(io.io());
@@ -77,9 +105,11 @@ pub fn generate_dev(init: std.process.Init) !void {
         });
     }
 
-    var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(300), .clock = .boot }) };
+    var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(10), .clock = .boot }) };
 
     try timeout.sleep(io.io());
+
+    session.gracefulShutdown(io.io());
 
     try supervisor.cancel(io.io());
 
