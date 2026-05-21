@@ -193,6 +193,12 @@ const AuthGen = struct {
 
         _ = try self.transport.recv(self.io, buf);
 
+        if (buf.len == 4) {
+            const code = std.mem.readInt(i32, buf[0..4], .little);
+            log.err("protocol error received: {d}", .{code});
+            return GenError.InvalidResponse;
+        }
+
         const len_body = std.mem.readInt(u32, buf[16..20], .little);
         var size: usize = 0;
         _ = tl.TL.deserializeSize(buf[20 .. 20 + len_body], &size);

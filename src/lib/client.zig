@@ -23,6 +23,8 @@ pub const Config = struct {
     lang_code: ?[]const u8 = null,
 
     testmode: bool = false,
+    enable_ipv6: bool = true,
+    enable_ipv4: bool = true,
 
     add_branding: bool = true,
 
@@ -36,7 +38,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !*C
     log.info("mzproto version {s}", .{CompileOptions.VERSION});
 
     // TODO: implement support for other transports (websockets, http)
-    var connector = try TransportConnector.init(allocator, .tcp, .Abridged);
+    var connector = try TransportConnector.init(allocator, .tcp, .Abridged, config.enable_ipv6, config.enable_ipv4);
     errdefer connector.deinit(allocator, io);
 
     var storage = try Storage.init(allocator, io, config.storage_backend, config.storage_dst);

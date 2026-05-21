@@ -4,9 +4,11 @@ const tl = @import("./tl/api.zig");
 
 const TIMEOUT_CONNECTION = std.Io.Duration.fromSeconds(5);
 
-pub const DcAddress = union(enum) {
+pub const DcAddressValue = union(enum) {
     tcp: std.Io.net.IpAddress,
 };
+
+pub const DcAddress = struct { addr: DcAddressValue, enable_obfuscation: bool = false, obfuscation_key: ?[16]u8 = null };
 
 pub const TransportHolder = struct {
     transport: *Transport,
@@ -26,33 +28,68 @@ const Transport = @import("./transport.zig").Transport;
 
 const TransportConnector = @This();
 
-mutex: std.Io.Mutex = .init,
-dc_address_map: std.AutoHashMapUnmanaged(utils.DcId, DcAddress) = .empty,
+lock: std.Io.RwLock = .init,
+
+dc_address_map: std.AutoHashMapUnmanaged(utils.DcId, std.ArrayList(DcAddress)) = .empty,
 mode: TransportMode,
+
+enable_ipv6: bool,
+enable_ipv4: bool,
 
 const DEFAULT_TCP_PROD_SERVER = .{
     utils.DcId{ .id = 2 },
-    DcAddress{ .tcp = (std.Io.net.IpAddress.parse("149.154.167.50", 443) catch unreachable) },
+    .{ DcAddress{ .addr = .{ .tcp = (std.Io.net.IpAddress.parse("2001:67c:4e8:f002::a", 443) catch unreachable) } }, DcAddress{ .addr = .{ .tcp = (std.Io.net.IpAddress.parse("149.154.167.50", 443) catch unreachable) } } },
 };
 
 const DEFAULT_TCP_TEST_SERVER = .{
     utils.DcId{ .id = 2, .testmode = true },
-    DcAddress{ .tcp = (std.Io.net.IpAddress.parse("149.154.167.40", 443) catch unreachable) },
+    .{
+        DcAddress{ .addr = .{ .tcp = (std.Io.net.IpAddress.parse("2001:67c:4e8:f002::e", 443) catch unreachable) } },
+        DcAddress{
+            .addr = .{ .tcp = (std.Io.net.IpAddress.parse("149.154.167.40", 443) catch unreachable) },
+        },
+    },
 };
 
-pub fn init(allocator: std.mem.Allocator, protocol: std.meta.Tag(DcAddress), mode: TransportMode) !TransportConnector {
-    var self: TransportConnector = .{ .mode = mode };
+pub fn init(allocator: std.mem.Allocator, protocol: std.meta.Tag(DcAddressValue), mode: TransportMode, enable_ipv6: bool, enable_ipv4: bool) !TransportConnector {
+    var self: TransportConnector = .{ .mode = mode, .enable_ipv6 = enable_ipv6, .enable_ipv4 = enable_ipv4 };
     if (protocol == .tcp) {
         try self.dc_address_map.ensureUnusedCapacity(allocator, 2);
-        self.dc_address_map.putAssumeCapacity(DEFAULT_TCP_PROD_SERVER[0], DEFAULT_TCP_PROD_SERVER[1]);
-        self.dc_address_map.putAssumeCapacity(DEFAULT_TCP_TEST_SERVER[0], DEFAULT_TCP_TEST_SERVER[1]);
+        errdefer self.dc_address_map.deinit(allocator);
+
+        var dc_prod: std.ArrayList(DcAddress) = try .initCapacity(allocator, 2);
+        errdefer dc_prod.deinit(allocator);
+
+        if (enable_ipv4) {
+            dc_prod.appendAssumeCapacity(DEFAULT_TCP_PROD_SERVER[1][0]);
+        }
+
+        if (enable_ipv6) {
+            dc_prod.appendAssumeCapacity(DEFAULT_TCP_PROD_SERVER[1][1]);
+        }
+
+        var dc_test: std.ArrayList(DcAddress) = try .initCapacity(allocator, 2);
+        errdefer dc_test.deinit(allocator);
+
+        if (enable_ipv4) {
+            dc_test.appendAssumeCapacity(DEFAULT_TCP_TEST_SERVER[1][0]);
+        }
+
+        if (enable_ipv6) {
+            dc_test.appendAssumeCapacity(DEFAULT_TCP_TEST_SERVER[1][1]);
+        }
+
+        //dc_test.appendSliceAssumeCapacity(&DEFAULT_TCP_TEST_SERVER[1]);
+
+        self.dc_address_map.putAssumeCapacity(DEFAULT_TCP_PROD_SERVER[0], dc_prod);
+        self.dc_address_map.putAssumeCapacity(DEFAULT_TCP_TEST_SERVER[0], dc_test);
     }
     return self;
 }
 
 pub fn pickFirstDc(self: *TransportConnector, io: std.Io, test_mode: bool) utils.DcId {
-    self.mutex.lockUncancelable(io);
-    defer self.mutex.unlock(io);
+    self.lock.lockSharedUncancelable(io);
+    defer self.lock.unlockShared(io);
 
     var it = self.dc_address_map.iterator();
     while (it.next()) |dc| {
@@ -65,14 +102,14 @@ pub fn pickFirstDc(self: *TransportConnector, io: std.Io, test_mode: bool) utils
 }
 
 pub inline fn isAvailable(self: *TransportConnector, io: std.Io, dc_id: utils.DcId) bool {
-    self.mutex.lockUncancelable(io);
-    defer self.mutex.unlock(io);
+    self.lock.lockSharedUncancelable(io);
+    defer self.lock.unlockShared(io);
     return self.dc_address_map.contains(dc_id);
 }
 
 pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
-    try self.mutex.lock(io);
-    defer self.mutex.unlock(io);
+    try self.lock.lock(io);
+    defer self.lock.unlock(io);
 
     for (config.dc_options) |idc_option| {
         const dc_option = idc_option.DcOption;
@@ -82,45 +119,90 @@ pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io:
             continue;
         }
 
-        // TODO: add support for ipv6
-        if (dc_option.ipv6) {
+        if (!self.enable_ipv6 and dc_option.ipv6) {
             continue;
         }
 
-        try self.dc_address_map.put(allocator, .{
+        if (!self.enable_ipv4 and !dc_option.ipv6) {
+            continue;
+        }
+
+        const dc_addr_list = try self.dc_address_map.getOrPut(allocator, .{
             .id = @intCast(dc_option.id),
             .cdn = dc_option.cdn,
             .media = dc_option.media_only,
             .testmode = config.test_mode,
-        }, .{ .tcp = try .parse(dc_option.ip_address, @intCast(dc_option.port)) });
+        });
+
+        if (!dc_addr_list.found_existing) {
+            dc_addr_list.value_ptr.* = .empty;
+        } else {
+            if (dc_addr_list.value_ptr.items.len > 0) {
+                continue;
+            }
+        }
+
+        //dc_addr_list.value_ptr.clearRetainingCapacity();
+
+        try dc_addr_list.value_ptr.append(allocator, .{ .addr = .{ .tcp = try .parse(dc_option.ip_address, @intCast(dc_option.port)) } });
+
+        if (dc_option.ipv6 and dc_addr_list.value_ptr.items.len > 1) {
+            const first = dc_addr_list.value_ptr.items[0];
+            dc_addr_list.value_ptr.items[0] = dc_addr_list.value_ptr.items[dc_addr_list.value_ptr.items.len - 1];
+            dc_addr_list.value_ptr.items[dc_addr_list.value_ptr.items.len - 1] = first;
+        }
     }
 }
 
-pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, dc_id: utils.DcId) !?TransportHolder {
-    // TODO: add ipv6 support with fallback to ipv4. I don't have an internet connection with an assigned ipv6 address right now
+fn tcpConnectWithTimeout(addr: std.Io.net.IpAddress, io: std.Io, connect_options: std.Io.net.IpAddress.ConnectOptions, timeout: std.Io.Timeout) std.Io.net.IpAddress.ConnectError!std.Io.net.Stream {
+    // very overkill function that adds timeout, because std.io.Threaded doesn't support it right now directly
 
-    const address, const mode = blk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-        const address = self.dc_address_map.get(dc_id) orelse return null;
-        const mode = self.mode;
-        break :blk .{ address, mode };
-    };
+    const TaskResult = union(enum) { timeout: std.Io.Cancelable!void, ok: std.Io.net.IpAddress.ConnectError!std.Io.net.Stream };
 
+    const Select = std.Io.Select(TaskResult);
+    var buffer: [2]TaskResult = undefined;
+
+    var select = Select.init(io, &buffer);
+
+    select.concurrent(.ok, std.Io.net.IpAddress.connect, .{ &addr, io, connect_options }) catch @panic("concurrency unavailable");
+
+    select.concurrent(.timeout, std.Io.Timeout.sleep, .{ timeout, io }) catch @panic("concurrency unavailable");
+
+    const res = try select.await();
+
+    blk: {
+        const res_cancel = select.cancel() orelse break :blk;
+
+        if (res_cancel == .ok) {
+            const net = res_cancel.ok catch break :blk;
+            net.close(io);
+        }
+    }
+
+    if (res == .timeout) {
+        std.debug.print("timeout :(((\n", .{});
+        return std.Io.net.IpAddress.ConnectError.Timeout;
+    }
+
+    return res.ok;
+}
+
+fn connectAddress(addr: DcAddress, mode: TransportMode, allocator: std.mem.Allocator, io: std.Io) !?TransportHolder {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
     const transport = blk: {
-        switch (address) {
+        switch (addr.addr) {
             .tcp => |address_tcp| {
                 const writeBuf = try arena.allocator().alloc(u8, 512);
                 const readBuf = try arena.allocator().alloc(u8, 512);
 
-                const stream = try address_tcp.connect(io, .{
-                    .mode = .stream,
-                    // timeout is not implemented yet :(
-                    //.timeout = .{ .duration = .{ .raw = TIMEOUT_CONNECTION, .clock = .boot } },
-                });
+                //const stream = try address_tcp.connect(io, .{
+                //  .mode = .stream,
+                // timeout is not implemented yet :(
+                //.timeout = .{ .duration = .{ .raw = TIMEOUT_CONNECTION, .clock = .boot } },
+                //});
+                const stream = try tcpConnectWithTimeout(address_tcp, io, .{ .mode = .stream }, .{ .duration = .{ .raw = TIMEOUT_CONNECTION, .clock = .boot } });
                 errdefer stream.close(io);
 
                 switch (mode) {
@@ -134,10 +216,39 @@ pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: st
         }
     };
     errdefer transport.deinit(io);
+
     return .{ .arena = arena, .transport = transport };
 }
 
+pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, dc_id: utils.DcId) !?TransportHolder {
+    try self.lock.lockShared(io);
+    defer self.lock.unlockShared(io);
+    const addresses, const mode = blk: {
+        const address = self.dc_address_map.get(dc_id) orelse return null;
+        const mode = self.mode;
+        break :blk .{ address, mode };
+    };
+
+    for (addresses.items) |address| {
+        std.debug.print("trying {f}\n", .{address.addr.tcp});
+        const holder = connectAddress(address, mode, allocator, io) catch {
+            continue;
+        };
+
+        return holder;
+    }
+
+    return std.Io.net.IpAddress.ConnectError.NetworkUnreachable;
+}
+
 pub fn deinit(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io) void {
-    self.mutex.lockUncancelable(io);
+    self.lock.lockUncancelable(io);
+
+    var it = self.dc_address_map.iterator();
+
+    while (it.next()) |dc| {
+        dc.value_ptr.deinit(allocator);
+    }
+
     self.dc_address_map.deinit(allocator);
 }

@@ -35,7 +35,7 @@ pub fn generate_dev(init: std.process.Init) !void {
         .api_id = 3,
         .api_hash = "a",
 
-        .testmode = true,
+        .testmode = false,
         .storage_dst = "/tmp/mzproto.db",
     });
     var timeout: std.Io.Timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io.io(), .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(10), .clock = .boot }) };
