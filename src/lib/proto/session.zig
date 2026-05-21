@@ -543,112 +543,39 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
 
     log.debug("Received RPC Result, {d}->{d} - {f}", .{ rpc_result.req_msg_id, req_id, self.dc });
 
-    const id = std.mem.readInt(u32, rpc_result.body[0..4], .little);
-    if (tl.TL.identify(id)) |ty| {
-        switch (ty) {
-            .ProtoRpcError => {
-                var size: usize = 0;
-                _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
+    const id = tl.TL.identify(std.mem.readInt(u32, rpc_result.body[0..4], .little));
 
-                const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
-                errdefer allocator.free(buf);
-                const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
+    const deserialized, const buf = blk: {
+        if (id == .ProtoGzipPacked) {
+            const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
+            var reader = std.Io.Reader.fixed(gzip);
 
-                try self.mutex.lock(io);
-                defer self.mutex.unlock(io);
+            var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
 
-                const answer = self.pending_answers.map.getPtr(req_id) orelse {
-                    allocator.free(buf);
-                    return;
-                };
+            const decompressed = try decompress.reader.allocRemaining(allocator, .limited64(4000000));
+            defer allocator.free(decompressed);
 
-                if (self.tryToRecover(err, answer.*)) {
-                    allocator.free(buf);
+            var size_deserialize: usize = 0;
+            _ = deserializeResultSize(decompressed, &size_deserialize);
 
-                    if (answer.*.proto_container_id) |container_id| {
-                        self.removeMessageFromContainer(allocator, container_id, req_id);
-                    }
+            const buf = try allocator.alloc(u8, size_deserialize);
+            errdefer allocator.free(buf);
 
-                    answer.*.data = SendError.Resend;
-                    answer.*.event.set(io);
-                    return;
-                }
-
-                answer.*.status = .answered;
-                answer.*.last_probed_at = .now(io, .boot);
-
-                if (answer.*.proto_container_id) |container_id| {
-                    self.removeMessageFromContainer(allocator, container_id, req_id);
-                }
-
-                answer.*.data = .{ .ptr = buf, .alignment = .of(tl.ProtoRpcError), .data = tl.TL{ .ProtoRpcError = err } };
-                answer.*.event.set(io);
-            },
-            .ProtoGzipPacked => {
-                const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
-                var reader = std.Io.Reader.fixed(gzip);
-
-                var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
-
-                const decompressed = try decompress.reader.allocRemaining(allocator, .unlimited);
-                defer allocator.free(decompressed);
-
-                var size_deserialize: usize = 0;
-                _ = deserializeResultSize(decompressed, &size_deserialize);
-
-                const buf = try allocator.alloc(u8, size_deserialize);
-                errdefer allocator.free(buf);
-
-                const deserialized, _, _ = deserializeResult(decompressed, buf);
-
-                try self.mutex.lock(io);
-                defer self.mutex.unlock(io);
-
-                const answer = self.pending_answers.map.getPtr(req_id) orelse {
-                    allocator.free(buf);
-                    return;
-                };
-
-                if (answer.*.proto_container_id) |container_id| {
-                    self.removeMessageFromContainer(allocator, container_id, req_id);
-                }
-
-                answer.*.status = .answered;
-                answer.*.last_probed_at = .now(io, .boot);
-
-                answer.*.data = .{ .data = deserialized, .ptr = buf };
-                answer.*.event.set(io);
-            },
-            else => {
-                var size_deserialize: usize = 0;
-                _ = deserializeResultSize(rpc_result.body, &size_deserialize);
-
-                const buf = try allocator.alloc(u8, size_deserialize);
-                errdefer allocator.free(buf);
-
-                const deserialized, _, _ = deserializeResult(rpc_result.body, buf);
-
-                try self.mutex.lock(io);
-                defer self.mutex.unlock(io);
-
-                const answer = self.pending_answers.map.getPtr(req_id) orelse {
-                    allocator.free(buf);
-                    return;
-                };
-
-                answer.*.status = .answered;
-                answer.*.last_probed_at = .now(io, .boot);
-
-                if (answer.*.proto_container_id) |container_id| {
-                    self.removeMessageFromContainer(allocator, container_id, req_id);
-                }
-
-                answer.*.data = .{ .data = deserialized, .ptr = buf };
-                answer.*.event.set(io);
-            },
+            const deserialized, _, _ = deserializeResult(decompressed, buf);
+            break :blk .{ deserialized, buf };
         }
-    } else {
-        // Although this shouldn't happen for pretty much all of the registered functions (at the time of writing), an rpc_result may pass an object that is still valid (eg. bare constructors)
+
+        if (id == .ProtoRpcError) {
+            var size: usize = 0;
+            _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
+
+            const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
+            errdefer allocator.free(buf);
+            const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
+
+            break :blk .{ tl.TL{ .ProtoRpcError = err }, buf };
+        }
+
         var size_deserialize: usize = 0;
         _ = deserializeResultSize(rpc_result.body, &size_deserialize);
 
@@ -657,24 +584,51 @@ fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc
 
         const deserialized, _, _ = deserializeResult(rpc_result.body, buf);
 
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+        break :blk .{ deserialized, buf };
+    };
 
-        const answer = self.pending_answers.map.getPtr(req_id) orelse {
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
+    var buf_used = false;
+
+    defer {
+        if (!buf_used) {
             allocator.free(buf);
-            return;
-        };
-
-        answer.*.status = .answered;
-        answer.*.last_probed_at = .now(io, .boot);
-
-        if (answer.*.proto_container_id) |container_id| {
-            self.removeMessageFromContainer(allocator, container_id, req_id);
         }
-
-        answer.*.data = .{ .data = deserialized, .ptr = buf };
-        answer.*.event.set(io);
     }
+
+    const answer = self.pending_answers.map.getPtr(req_id) orelse {
+        return;
+    };
+
+    if (answer.*.proto_container_id) |container_id| {
+        self.removeMessageFromContainer(allocator, container_id, req_id);
+    }
+
+    if (deserialized == .ProtoRpcError) {
+        if (self.tryToRecover(deserialized.ProtoRpcError, answer.*)) {
+            //allocator.free(buf);
+
+            //if (answer.*.proto_container_id) |container_id| {
+            //    self.removeMessageFromContainer(allocator, container_id, req_id);
+            //}
+
+            answer.*.data = SendError.Resend;
+            answer.*.event.set(io);
+            return;
+        }
+        answer.*.data = .{ .ptr = buf, .alignment = .of(tl.ProtoRpcError), .data = deserialized };
+    } else {
+        answer.*.data = .{ .data = deserialized, .ptr = buf };
+    }
+
+    buf_used = true;
+
+    answer.*.status = .answered;
+    answer.*.last_probed_at = .now(io, .boot);
+
+    answer.*.event.set(io);
 
     self.init_ok = true;
 }
