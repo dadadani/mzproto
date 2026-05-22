@@ -5,7 +5,7 @@ const Dispatcher = @import("./proto/dispatcher.zig");
 const TransportConnector = @import("../lib/transport_connector.zig");
 const DcId = @import("./utils.zig").DcId;
 const Storage = @import("./storage.zig").Storage;
-const tl = @import("tl/api.zig");
+const tl = @import("tl");
 
 session_info: struct {
     lock: std.Io.RwLock = .init,

@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("./utils.zig");
-const tl = @import("./tl/api.zig");
+const tl = @import("tl");
 
 const TIMEOUT_CONNECTION = std.Io.Duration.fromSeconds(5);
 
@@ -180,7 +180,6 @@ fn tcpConnectWithTimeout(addr: std.Io.net.IpAddress, io: std.Io, connect_options
     }
 
     if (res == .timeout) {
-        std.debug.print("timeout :(((\n", .{});
         return std.Io.net.IpAddress.ConnectError.Timeout;
     }
 
@@ -229,8 +228,7 @@ pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: st
         break :blk .{ address, mode };
     };
 
-    for (addresses.items) |address| {
-        std.debug.print("trying {f}\n", .{address.addr.tcp});
+    for (addresses.items) |address| { 
         const holder = connectAddress(address, mode, allocator, io) catch {
             continue;
         };

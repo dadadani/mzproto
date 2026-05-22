@@ -125,3 +125,5 @@ pub fn deinit(self: *Client, allocator: std.mem.Allocator, io: std.Io) void {
     self.client_manager.deinit(allocator, io);
     allocator.destroy(self);
 }
+
+

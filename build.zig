@@ -1,7 +1,7 @@
 const std = @import("std");
 const buildzon = @import("./build.zig.zon");
 
-pub fn build_mzproto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite: *std.Build.Dependency, enable_sqlite: bool) *std.Build.Module {
+pub fn build_mzproto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite: *std.Build.Dependency, enable_sqlite: bool, tl_base: *std.Build.Module, tl_api_path: std.Build.LazyPath) *std.Build.Module {
     var options = b.addOptions();
     options.addOption([]const u8, "VERSION", buildzon.version);
     options.addOption(bool, "ENABLE_SQLITE", enable_sqlite);
@@ -14,12 +14,20 @@ pub fn build_mzproto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite.module("sqlite") },
             .{ .name = "mzproto_options", .module = options.createModule() },
+            .{ .name = "tl_base", .module = tl_base },
         },
     });
 
     mod.addIncludePath(b.path("./src/lib/crypto/"));
     mod.addCSourceFile(.{
         .file = b.path("./src/lib/crypto/pq.c"),
+    });
+
+    mod.addAnonymousImport("tl", .{
+        .root_source_file = tl_api_path,
+        .imports = &.{
+            .{ .name = "tl_base", .module = tl_base },
+        },
     });
 
     return mod;
@@ -53,7 +61,26 @@ pub fn build(b: *std.Build) void {
 
     const enable_sqlite = b.option(bool, "enable-sqlite", "Whether the sqlite storage backend should be enabled or not (default: true)") orelse true;
 
-    const mzproto = build_mzproto(b, target, optimize, sqlite, enable_sqlite);
+    const tl_base = b.addModule("tl_base", .{
+        .root_source_file = b.path("./src/tl_base.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const tl_generator = b.addExecutable(.{
+        .name = "generate_tl",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("./src/generator/main.zig"),
+            .target = b.graph.host,
+        }),
+    });
+
+    const tl_generator_step = b.addRunArtifact(tl_generator);
+    const tl_api_path = tl_generator_step.addOutputFileArg("tl_api.zig");
+    tl_generator_step.addFileArg(b.path("./src/generator/schema/api.tl"));
+    tl_generator_step.addFileArg(b.path("./src/generator/schema/mtproto.tl"));
+
+    const mzproto = build_mzproto(b, target, optimize, sqlite, enable_sqlite, tl_base, tl_api_path);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

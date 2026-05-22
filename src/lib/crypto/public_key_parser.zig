@@ -2,7 +2,7 @@ const std = @import("std");
 
 const RSAPublicKey = @This();
 
-const serializeString = @import("../tl/base.zig").serializeString;
+const serializeString = @import("tl_base").serializeString;
 
 modulus: u2048,
 exponent: u64,

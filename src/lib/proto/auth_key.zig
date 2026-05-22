@@ -1,4 +1,4 @@
-const tl = @import("../tl/api.zig");
+const tl = @import("tl");
 const std = @import("std");
 
 extern fn pq_factor(n: u64, p: [*c]u64, q: [*c]u64) c_int;

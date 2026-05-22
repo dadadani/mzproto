@@ -1,5 +1,5 @@
 const std = @import("std");
-const constructors = @import("../parser/constructors.zig");
+const constructors = @import("./tl_parser/constructors.zig");
 const utils = @import("./utils.zig");
 
 pub fn generateConstructorCloneSize(allocator: std.mem.Allocator, constructor: constructors.TLConstructor, constructorName: []const u8, writer: *std.Io.Writer, mtproto: bool) !void {

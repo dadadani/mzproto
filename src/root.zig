@@ -1,6 +1,6 @@
 const std = @import("std");
 const tl_tests = @import("lib/tl/api_tests.zig");
-const tl = @import("./lib/tl/api.zig");
+const tl = @import("tl");
 const generate = @import("./lib/proto/auth_key.zig");
 const Transport = @import("./lib/transport.zig").Transport;
 const utils = @import("./lib/proto/utils.zig");

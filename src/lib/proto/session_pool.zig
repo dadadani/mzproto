@@ -4,7 +4,7 @@ const std = @import("std");
 const Session = @import("session.zig");
 const ClientManager = @import("../client_manager.zig");
 const TransportConnector = @import("../transport_connector.zig");
-const tl = @import("../tl/api.zig");
+const tl = @import("tl");
 const Deserialized = @import("./utils.zig").Deserialized;
 
 const log = std.log.scoped(.mzproto_sessionpool);

@@ -1,6 +1,6 @@
 const std = @import("std");
-const constructors = @import("../parser/constructors.zig");
-const parser = @import("../parser/parse.zig");
+const constructors = @import("./tl_parser/constructors.zig");
+const parser = @import("./tl_parser/parse.zig");
 const findLayer = @import("utils.zig").findLayer;
 const tlPrimitiveName = @import("utils.zig").tlPrimitiveName;
 const typeToZig = @import("utils.zig").typeToZig;
@@ -41,8 +41,8 @@ fn parseFile(allocator: std.mem.Allocator, io: std.Io, filename: []const u8) !st
     return definitions;
 }
 
-pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
-    if (try findLayer(io, "schema/api.tl")) |layer| {
+pub fn boilerplate(io: std.Io, filename: []const u8, writer: *std.Io.Writer) !void {
+    if (try findLayer(io, filename)) |layer| {
         _ = try writer.print(
             \\//! Provides low-level, zero-allocation bindings for the Telegram (TL) API schema.
             \\//! This module contains all the data types and functions needed to serialize and
@@ -52,7 +52,7 @@ pub fn boilerplate(io: std.Io, writer: *std.Io.Writer) !void {
             \\//! Do not edit it directly, as your changes will be overwritten by the generator.
             \\//!
             \\
-            \\const base = @import("base.zig");
+            \\const base = @import("tl_base");
             \\const std = @import("std");
             \\
             \\pub const LAYER_VERSION = {d};
@@ -123,7 +123,6 @@ fn parseAndGenerateFile(allocator: std.mem.Allocator, io: std.Io, filename: []co
     try registerBoxedMap(allocator, &boxed_map, defs, mtproto);
     try unions.generateBoxedUnions(allocator, &boxed_map, writer, mtproto);
 
-    std.log.info("Generating code for {s}...", .{filename});
     for (defs.items) |def| {
         {
             const name = try normalizeName(allocator, def, mtproto);
@@ -162,12 +161,16 @@ pub fn main(init: std.process.Init) !void {
     var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
     defer io.deinit();
 
-    const file = try std.Io.Dir.cwd().createFile(io.io(), "./src/lib/tl/api.zig", .{});
+    const args = try init.minimal.args.toSlice(allocator);
+
+    if (args.len != 4) fatal("wrong number of arguments", .{});
+
+    const file = try std.Io.Dir.cwd().createFile(io.io(), args[1], .{});
     defer file.close(io.io());
 
     var writer = file.writer(io.io(), &.{});
 
-    try boilerplate(io.io(), &writer.interface);
+    try boilerplate(io.io(), args[2], &writer.interface);
 
     var tl_union_list = std.ArrayList(TlUnionItem).empty;
     defer {
@@ -180,8 +183,13 @@ pub fn main(init: std.process.Init) !void {
         tl_union_list.deinit(allocator);
     }
 
-    try parseAndGenerateFile(allocator, io.io(), "./schema/api.tl", &writer.interface, &tl_union_list, false);
-    try parseAndGenerateFile(allocator, io.io(), "./schema/mtproto.tl", &writer.interface, &tl_union_list, true);
+    try parseAndGenerateFile(allocator, io.io(), args[2], &writer.interface, &tl_union_list, false);
+    try parseAndGenerateFile(allocator, io.io(), args[3], &writer.interface, &tl_union_list, true);
 
     try unions.generateTLUnion(&tl_union_list, &writer.interface);
+}
+
+fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.debug.print(format, args);
+    std.process.exit(1);
 }

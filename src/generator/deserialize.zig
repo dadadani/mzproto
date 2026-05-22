@@ -1,6 +1,6 @@
 const std = @import("std");
-const constructors = @import("../parser/constructors.zig");
-const TLType = @import("../parser/types.zig").TLType;
+const constructors = @import("./tl_parser/constructors.zig");
+const TLType = @import("./tl_parser/types.zig").TLType;
 const utils = @import("./utils.zig");
 
 pub fn generateConstructorResultDeserializeSize(allocator: std.mem.Allocator, ty: *const TLType, writer: *std.Io.Writer, mtproto: bool) !void {

@@ -1,4 +1,4 @@
-const tl = @import("../tl/api.zig");
+const tl = @import("tl");
 const std = @import("std");
 
 pub const Deserialized = struct {
@@ -56,7 +56,7 @@ pub fn Ring(comptime T: type, comptime N: usize) type {
     };
 }
 
-const makePadding = @import("../tl/base.zig").makePadding;
+const makePadding = @import("tl_base").makePadding;
 const ige = @import("../crypto/ige.zig").ige;
 
 fn kdfV1(auth_key: *const [256]u8, msg_key: []const u8, comptime x: usize) struct {

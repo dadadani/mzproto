@@ -1,7 +1,7 @@
 const std = @import("std");
-const types = @import("../parser/types.zig");
-const TLParameterType = @import("../parser/parameters_type.zig").TLParameterType;
-const TLType = @import("../parser/types.zig").TLType;
+const types = @import("./tl_parser/types.zig");
+const TLParameterType = @import("./tl_parser/parameters_type.zig").TLParameterType;
+const TLType = @import("./tl_parser/types.zig").TLType;
 
 /// Finds the layer version from a TL schema file.
 ///

@@ -1,5 +1,5 @@
 const std = @import("std");
-const constructors = @import("../parser/constructors.zig");
+const constructors = @import("./tl_parser/constructors.zig");
 const utils = @import("./utils.zig");
 
 pub fn generateBoxedUnions(allocator: std.mem.Allocator, map: *const std.StringArrayHashMapUnmanaged(std.ArrayList(constructors.TLConstructor)), writer: *std.Io.Writer, mtproto: bool) !void {

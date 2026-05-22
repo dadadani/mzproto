@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("api.zig");
+const api = @import("tl");
 
 test "basic constructor serialize & deserialize" {
     const allocator = std.testing.allocator;
