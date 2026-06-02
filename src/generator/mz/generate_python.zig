@@ -498,7 +498,6 @@ fn emitAll(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const 
 pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema) !void {
     try writer.writeAll(
         \\# mzproto Python public API
-        \\# Automatically generated.
         \\
         \\from __future__ import annotations
         \\

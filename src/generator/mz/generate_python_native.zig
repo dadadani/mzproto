@@ -549,7 +549,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     try writer.writeAll(
         \\///! mzproto Python native extension.
         \\///!
-        \\///! Automatically generated.
+        \\///! Automatically generated. do not edit
         \\
         \\const std = @import("std");
         \\const python = @import("python");

@@ -324,7 +324,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     try writer.writeAll(
         \\///! mzproto - bridge between ir and native zig
         \\///!
-        \\///! Automatically generated
+        \\///! Automatically generated. do not edit
         \\
         \\const std = @import("std");
         \\const papi = @import("mzproto");

@@ -400,7 +400,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     try writer.writeAll(
         \\///! mzproto - bridge between Python objects and runtime Zig code
     \\///!
-    \\///! Automatically generated placeholder replacement
+    \\///! Automatically generated. do not edit
     \\
     \\
     \\const std = @import("std");
