@@ -1,0 +1,89 @@
+// schema of mzproto's public api
+
+// The storage backend to use for storing data.
+StorageBackend: enum {
+    // Saves the authentication keys on a binary file, while everything else is saved in memory
+    //
+    // Warning: asdasdadsadasdsadasdas
+    MemoryDcBinStorage = 0,
+}
+
+// The configuration for mzproto
+Config: struct {
+    // Application identifier for Telegram API access, which can be obtained at https://my.telegram.org
+    api_id: u32,
+    // Application identifier hash for Telegram API access, which can be obtained at https://my.telegram.org
+    api_hash: string,
+    
+    // Application version
+    app_version: string,
+    // Model of the device the application is being run on;
+    device_model: string,
+    // Version of the operating system the application is being run on
+    system_version: string,
+    // Language code of the system language
+    system_language: ?string,
+    
+    // Whether the client should use test servers
+    testmode: ?bool,
+    // Whether the client should use IPv6
+    enable_ipv6: ?bool,
+    // Whether the client should use IPv4
+    enable_ipv4: ?bool,
+
+    // Whether the client should add branding to the user agent
+    add_branding: ?bool,
+
+    // Storage backend to use for storing data
+    storage_backend: StorageBackend,
+    // Path to the storage backend
+    storage_path: string,
+}
+
+TestSub1: struct {
+    a: i32,
+    b: i32,
+
+    // we could also define more "built-in" types, like...
+    some: bytes,
+    some1: time,
+    
+    some_obj: Config
+
+    // if we want, we can make "referenced objects"
+    ref_obj: ref Config
+    // a list
+    obj_list: list Config
+    obj_list_a: list u32
+
+    obj_list_ref: list ref Config
+
+    //random comment
+
+    sum: func(): i32
+    sum2: func(c: i32): i32
+}
+
+TestSub2: struct {
+    a: i64,
+    b: i64,
+
+    sum: func(): i64
+}
+
+Message: struct {
+    id: u64,
+}
+
+TestUnion: union {
+    sub1: TestSub1,
+    sub2: TestSub2,
+}
+
+// Sends a message (doesn't do anything right now)
+sendMessage: func(text: string): Message
+
+testReturnEnum: func(): StorageBackend
+
+// Terminates the client instance.
+terminate: sync func(): void

@@ -9,6 +9,7 @@ const AuthKey = @import("./proto/auth_key.zig");
 const Session = @import("./proto/session.zig");
 const utils = @import("./utils.zig");
 const TransportConnector = @import("./transport_connector.zig");
+const bapi = @import("mzproto_bridge");
 
 const log = std.log.scoped(.mzproto_client);
 
@@ -32,16 +33,36 @@ pub const Config = struct {
     storage_dst: []const u8,
 };
 
+fn storageBackend(orig: bapi.StorageBackend) Storage.Enum {
+    return switch (orig) {
+        .memory_dc_bin_storage => Storage.Enum.MemoryDcBinStorage,
+    };
+}
+
+allocator: std.mem.Allocator,
+io: std.Io,
 client_manager: ClientManager,
 
-pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !*Client {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfig) !*Client {
     log.info("mzproto version {s}", .{CompileOptions.VERSION});
 
+    const enable_ipv6 = config.getEnableIpv6() orelse true;
+    const enable_ipv4 = config.getEnableIpv4() orelse true;
+
+    const storage_backend = storageBackend(config.getStorageBackend());
+
     // TODO: implement support for other transports (websockets, http)
-    var connector = try TransportConnector.init(allocator, .tcp, .Abridged, config.enable_ipv6, config.enable_ipv4);
+    var connector = try TransportConnector.init(allocator, .tcp, .Abridged, enable_ipv6, enable_ipv4);
     errdefer connector.deinit(allocator, io);
 
-    var storage = try Storage.init(allocator, io, config.storage_backend, config.storage_dst);
+    const storage_dst = try config.getStoragePath().getUTF8(allocator);
+    defer {
+        if (bapi.PREFERRED_STRING_ENCODING != .utf8 or !bapi.STRINGS_ARE_NO_COPY) {
+            allocator.free(storage_dst);
+        }
+    }
+
+    var storage = try Storage.init(allocator, io, storage_backend, storage_dst);
     errdefer storage.deinit(allocator, io);
 
     const dc_id, const dc_switch_when_ready: ?utils.DcId = dc: {
@@ -53,29 +74,43 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !*C
             break :dc .{ connector.pickFirstDc(io, preferred_dc.testmode), preferred_dc };
         }
 
-        break :dc .{ connector.pickFirstDc(io, config.testmode), null };
+        break :dc .{ connector.pickFirstDc(io, config.getTestmode() orelse false), null };
     };
 
     const self = try allocator.create(Client);
     errdefer allocator.destroy(self);
 
-    const api_hash = try allocator.dupe(u8, config.api_hash);
+    const api_hash = try config.getApiHash().getUTF8Copy(allocator);
     errdefer allocator.free(api_hash);
 
-    const app_version = if (config.add_branding) try std.fmt.allocPrint(allocator, "{s} (mzproto {s})", .{ config.app_version, CompileOptions.VERSION }) else try allocator.dupe(u8, config.app_version);
+    const app_version = blk: {
+        const add_branding = config.getAddBranding();
+        if (add_branding orelse true) {
+            const version = try config.getAppVersion().getUTF8Copy(allocator);
+            defer allocator.free(version);
+            break :blk try std.fmt.allocPrint(allocator, "{s} (mzproto {s})", .{ version, CompileOptions.VERSION });
+        }
+        const version = try config.getAppVersion().getUTF8Copy(allocator);
+        break :blk version;
+    };
     errdefer allocator.free(app_version);
 
-    const device_model = try allocator.dupe(u8, config.device_model);
+    //const app_version = if (config.add_branding) try std.fmt.allocPrint(allocator, "{s} (mzproto {s})", .{ config.app_version, CompileOptions.VERSION }) else try allocator.dupe(u8, config.app_version);
+    //errdefer allocator.free(app_version);
+
+    const device_model = try config.getDeviceModel().getUTF8Copy(allocator);
     errdefer allocator.free(device_model);
 
-    const system_version = try allocator.dupe(u8, config.system_version);
+    const system_version = try config.getSystemVersion().getUTF8Copy(allocator);
     errdefer allocator.free(system_version);
 
-    const lang_code = if (config.lang_code) |lang_code|
-        try allocator.dupe(u8, lang_code)
-    else
+    const lang_code = blk: {
+        if (config.getSystemLanguage()) |lang_code| {
+            break :blk try lang_code.getUTF8Copy(allocator);
+        }
         // TODO: get language from system automatically
-        try allocator.dupe(u8, "en");
+        break :blk try allocator.dupe(u8, "en");
+    };
     errdefer allocator.free(lang_code);
 
     const system_lang_code = try allocator.dupe(u8, lang_code);
@@ -86,9 +121,11 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !*C
     errdefer allocator.free(lang_pack);
 
     self.* = .{
+        .allocator = allocator,
+        .io = io,
         .client_manager = .{
             .session_info = .{
-                .api_id = config.api_id,
+                .api_id = config.getApiId(),
                 .api_hash = api_hash,
                 .app_version = app_version,
                 .device_model = device_model,
@@ -120,10 +157,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !*C
     return self;
 }
 
-pub fn deinit(self: *Client, allocator: std.mem.Allocator, io: std.Io) void {
+pub fn deinit(self: *Client) void {
     log.info("Shutting down", .{});
-    self.client_manager.deinit(allocator, io);
-    allocator.destroy(self);
+    self.client_manager.deinit(self.allocator, self.io);
+    self.allocator.destroy(self);
 }
-
-
