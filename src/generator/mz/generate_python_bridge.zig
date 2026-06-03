@@ -987,8 +987,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\
     \\fn pyEnumFromObject(comptime T: type, object: ?*python.PyObject) BridgeError!T {
     \\    const raw = try pyU64FromObject(object);
-    \\    inline for (@typeInfo(T).@"enum".fields) |field| {
-    \\        if (raw == field.value) return @enumFromInt(raw);
+    \\    inline for (@typeInfo(T).@"enum".field_values) |value| {
+    \\        if (raw == value) return @enumFromInt(raw);
     \\    }
     \\    setTypeError("invalid enum value");
     \\    return error.PythonError;

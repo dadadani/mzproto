@@ -25,7 +25,7 @@
     .fingerprint = 0x30851802804772e1, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.17.0-dev.644+3de725074",
+    .minimum_zig_version = "0.17.0-dev.779+22aa2bd1e",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -33,12 +33,12 @@
     // internet connectivity.
     .dependencies = .{
         .sqlite = .{
-            .url = "git+https://github.com/dadadani/zig-sqlite.git#55637936148bf6c9ea2bbe57659c5877a7e54878",
-            .hash = "sqlite-3.48.0-F2R_a9gEBQBkJT7kzdUnbb8Qm5KI8csGmtNJBnRDe1fT",
+            .url = "git+https://github.com/dadadani/zig-sqlite#67062687320c6c52dc64bc5df85ce0580450ac71",
+            .hash = "sqlite-3.48.0-F2R_a9YGBQD9-juro0eGgYs3GfMZwygko7DbfTQtoNSN",
         },
         .translate_c = .{
-            .url = "git+https://codeberg.org/ziglang/translate-c#e5d8d99bf27b9ae742b90bc4e2c8ff68a9bab173",
-            .hash = "translate_c-0.0.0-Q_BUWv0OBwB0EgJ9A41ljwlmyKHA-aBwbDmGWjPmR5ai",
+            .url = "git+https://codeberg.org/ziglang/translate-c#c26bb176f3d63c8f3f57ac4e82d78f9124506b0d",
+            .hash = "translate_c-0.0.0-Q_BUWuEVBwCbZUsNorTQ6-d3nYx8KDgHHWtVWBzgzyB5",
         },
     },
     .paths = .{
