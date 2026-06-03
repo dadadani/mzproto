@@ -452,7 +452,7 @@ fn emitClientOperation(writer: *std.Io.Writer, allocator: std.mem.Allocator, sch
         defer allocator.free(name);
         try writer.print(", bridge_{s}", .{name});
     }
-    try writer.writeAll(");\n");
+    try writer.writeAll(") catch {\n        ensurePythonException(\"mzproto bridge error\");\n        return null;\n    };\n");
 
     try writer.writeAll("    switch (result) {\n");
     try emitReturnValue(writer, allocator, schema, fun.return_type);
@@ -479,13 +479,14 @@ fn emitAsyncClientOperation(writer: *std.Io.Writer, allocator: std.mem.Allocator
         try writer.print("    defer pyDecref({s}_object);\n", .{name});
     }
     try emitBridgeArgsFromObjects(writer, allocator, schema, fun.params.items);
+    try writer.writeAll("    const bridge_state = python.PyGILState_Ensure();\n");
     try writer.print("    const result = runtime_impl.Methods.Client.{s}(client.ptr", .{fun.name});
     for (fun.params.items) |param| {
         const name = try pythonIdentifierOwned(allocator, param.name);
         defer allocator.free(name);
         try writer.print(", bridge_{s}", .{name});
     }
-    try writer.writeAll(");\n");
+    try writer.writeAll(") catch {\n        const exception = takeCurrentExceptionOwned(\"mzproto bridge error\") orelse {\n            python.PyGILState_Release(bridge_state);\n            scheduleFutureRuntimeError(loop, future, \"mzproto bridge error\");\n            return;\n        };\n        python.PyGILState_Release(bridge_state);\n        scheduleFutureExceptionObject(loop, future, exception);\n        return;\n    };\n    python.PyGILState_Release(bridge_state);\n");
     try writer.writeAll("    switch (result) {\n");
     try writer.print("        .ok => |value| {{\n            const state = python.PyGILState_Ensure();\n            const object = {s}ResultToPy(value);\n            python.PyGILState_Release(state);\n            if (object == null) {{\n                scheduleFutureRuntimeError(loop, future, \"failed to convert mzproto result\");\n                return;\n            }}\n            scheduleFutureResult(loop, future, object);\n        }},\n", .{py_func});
     try writer.writeAll("        .err => |err| {\n            const exception = createMzExceptionOwned(err) orelse {\n                scheduleFutureRuntimeError(loop, future, \"mzproto error\");\n                return;\n            };\n            scheduleFutureExceptionObject(loop, future, exception);\n        },\n    }\n}\n\n");
@@ -595,6 +596,17 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\
         \\fn setNativeError(message: [*:0]const u8) void {
         \\    python.PyErr_SetString(python.PyExc_RuntimeError, message);
+        \\}
+        \\
+        \\fn ensurePythonException(message: [*:0]const u8) void {
+        \\    if (python.PyErr_Occurred() == null) setNativeError(message);
+        \\}
+        \\
+        \\fn takeCurrentExceptionOwned(message: [*:0]const u8) ?*python.PyObject {
+        \\    const state = python.PyGILState_Ensure();
+        \\    defer python.PyGILState_Release(state);
+        \\    if (python.PyErr_Occurred() == null) python.PyErr_SetString(python.PyExc_RuntimeError, message);
+        \\    return @ptrCast(python.PyErr_GetRaisedException());
         \\}
         \\
         \\fn createAsyncioFutureOwned(loop_out: *?*python.PyObject) ?*python.PyObject {
@@ -803,7 +815,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\
         \\fn destroyNativeClient(client: *NativeClient, comptime terminate: bool) !void {
         \\    cancelClientAsyncGroupAllowThreads(client);
-        \\    const result = if (terminate) runtime_impl.Methods.Client.terminate(client.ptr) else runtime_impl.Methods.Client.deinit(client.ptr);
+        \\    const result = (if (terminate) runtime_impl.Methods.Client.terminate(client.ptr) else runtime_impl.Methods.Client.deinit(client.ptr)) catch return error.Bridge;
         \\    client.io.deinit();
         \\    python.PyMem_Free(client);
         \\    switch (result) {
@@ -895,7 +907,13 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\    var bridge_config_ref = bapi.RefConfig.fromNewRef(@ptrCast(config_object));
         \\    defer bridge_config_ref.deinit(client.allocator);
         \\    const bridge_config = bridge_config_ref.toConst();
-        \\    client.ptr = switch (runtime_impl.Methods.Client.init(client.allocator, client.io.io(), bridge_config)) {
+        \\    const init_result = runtime_impl.Methods.Client.init(client.allocator, client.io.io(), bridge_config) catch {
+        \\        client.io.deinit();
+        \\        python.PyMem_Free(client);
+        \\        ensurePythonException("mzproto bridge error");
+        \\        return null;
+        \\    };
+        \\    client.ptr = switch (init_result) {
         \\        .ok => |ptr| ptr,
         \\        .err => |err| {
         \\            client.io.deinit();

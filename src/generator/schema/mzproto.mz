@@ -83,7 +83,7 @@ TestUnion: union {
 // Sends a message (doesn't do anything right now)
 sendMessage: func(text: string): Message
 
-testReturnEnum: func(): StorageBackend
+testReturnEnum: func(testfield: list Message): StorageBackend
 
 // Terminates the client instance.
 terminate: sync func(): void

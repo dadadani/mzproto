@@ -46,16 +46,16 @@ client_manager: ClientManager,
 pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfig) !*Client {
     log.info("mzproto version {s}", .{CompileOptions.VERSION});
 
-    const enable_ipv6 = config.getEnableIpv6() orelse true;
-    const enable_ipv4 = config.getEnableIpv4() orelse true;
+    const enable_ipv6 = (try config.getEnableIpv6()) orelse true;
+    const enable_ipv4 = (try config.getEnableIpv4()) orelse true;
 
-    const storage_backend = storageBackend(config.getStorageBackend());
+    const storage_backend = storageBackend(try config.getStorageBackend());
 
     // TODO: implement support for other transports (websockets, http)
     var connector = try TransportConnector.init(allocator, .tcp, .Abridged, enable_ipv6, enable_ipv4);
     errdefer connector.deinit(allocator, io);
 
-    const storage_dst = try config.getStoragePath().getUTF8(allocator);
+    const storage_dst = try (try config.getStoragePath()).getUTF8(allocator);
     defer {
         if (bapi.PREFERRED_STRING_ENCODING != .utf8 or !bapi.STRINGS_ARE_NO_COPY) {
             allocator.free(storage_dst);
@@ -74,23 +74,23 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
             break :dc .{ connector.pickFirstDc(io, preferred_dc.testmode), preferred_dc };
         }
 
-        break :dc .{ connector.pickFirstDc(io, config.getTestmode() orelse false), null };
+        break :dc .{ connector.pickFirstDc(io, (try config.getTestmode()) orelse false), null };
     };
 
     const self = try allocator.create(Client);
     errdefer allocator.destroy(self);
 
-    const api_hash = try config.getApiHash().getUTF8Copy(allocator);
+    const api_hash = try (try config.getApiHash()).getUTF8Copy(allocator);
     errdefer allocator.free(api_hash);
 
     const app_version = blk: {
-        const add_branding = config.getAddBranding();
+        const add_branding = try config.getAddBranding();
         if (add_branding orelse true) {
-            const version = try config.getAppVersion().getUTF8Copy(allocator);
+            const version = try (try config.getAppVersion()).getUTF8Copy(allocator);
             defer allocator.free(version);
             break :blk try std.fmt.allocPrint(allocator, "{s} (mzproto {s})", .{ version, CompileOptions.VERSION });
         }
-        const version = try config.getAppVersion().getUTF8Copy(allocator);
+        const version = try (try config.getAppVersion()).getUTF8Copy(allocator);
         break :blk version;
     };
     errdefer allocator.free(app_version);
@@ -98,14 +98,14 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
     //const app_version = if (config.add_branding) try std.fmt.allocPrint(allocator, "{s} (mzproto {s})", .{ config.app_version, CompileOptions.VERSION }) else try allocator.dupe(u8, config.app_version);
     //errdefer allocator.free(app_version);
 
-    const device_model = try config.getDeviceModel().getUTF8Copy(allocator);
+    const device_model = try (try config.getDeviceModel()).getUTF8Copy(allocator);
     errdefer allocator.free(device_model);
 
-    const system_version = try config.getSystemVersion().getUTF8Copy(allocator);
+    const system_version = try (try config.getSystemVersion()).getUTF8Copy(allocator);
     errdefer allocator.free(system_version);
 
     const lang_code = blk: {
-        if (config.getSystemLanguage()) |lang_code| {
+        if (try config.getSystemLanguage()) |lang_code| {
             break :blk try lang_code.getUTF8Copy(allocator);
         }
         // TODO: get language from system automatically
@@ -125,7 +125,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
         .io = io,
         .client_manager = .{
             .session_info = .{
-                .api_id = config.getApiId(),
+                .api_id = try config.getApiId(),
                 .api_hash = api_hash,
                 .app_version = app_version,
                 .device_model = device_model,

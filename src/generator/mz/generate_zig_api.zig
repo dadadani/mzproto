@@ -216,7 +216,7 @@ fn emitRuntimeBridgeDispatch(allocator: std.mem.Allocator, writer: *std.Io.Write
         for (params) |param| {
             try writer.print(", bridge_{s}", .{param.name});
         }
-        try writer.writeAll(");\n");
+        try writer.writeAll(") catch |err| return .{ .err = .{ .code = 500, .message = @errorName(err) } };\n");
     } else {
         try writer.print("        const result = runtime_impl.Methods.global.{s}(", .{fun_name});
         var first = true;
@@ -225,7 +225,7 @@ fn emitRuntimeBridgeDispatch(allocator: std.mem.Allocator, writer: *std.Io.Write
             first = false;
             try writer.print("bridge_{s}", .{param.name});
         }
-        try writer.writeAll(");\n");
+        try writer.writeAll(") catch |err| return .{ .err = .{ .code = 500, .message = @errorName(err) } };\n");
     }
 
     if (return_type.* == .named and utils.classifyNamed(schema, return_type.named) == .builtin_void) {
@@ -372,7 +372,7 @@ fn emitClientMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
     for (fun.params.items) |param| {
         try writer.print(", bridge_{s}", .{param.name});
     }
-    try writer.writeAll(");\n");
+    try writer.writeAll(") catch |err| return .{ .err = .{ .code = 500, .message = @errorName(err) } };\n");
 
     if (fun.return_type.* == .named and utils.classifyNamed(schema, fun.return_type.named) == .builtin_void) {
         try writer.writeAll(
@@ -419,7 +419,7 @@ fn emitClientWrapper(allocator: std.mem.Allocator, writer: *std.Io.Writer, schem
         \\    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: *const Config) !@This() {
         \\        const runtime_bridge = @import("mzproto_bridge");
         \\        const bridge_config = runtime_bridge.ConstRefConfig{ .value = @constCast(config) };
-        \\        const result = runtime_impl.Methods.Client.init(allocator, io, bridge_config);
+        \\        const result = runtime_impl.Methods.Client.init(allocator, io, bridge_config) catch return error.MzProto;
         \\        return switch (result) {
         \\            .ok => |ptr| .{ .ptr = ptr },
         \\            .err => error.MzProto,
@@ -428,7 +428,7 @@ fn emitClientWrapper(allocator: std.mem.Allocator, writer: *std.Io.Writer, schem
         \\
         \\    pub fn deinit(self: *@This()) void {
         \\        if (@intFromPtr(self.ptr) == 0) return;
-        \\        _ = runtime_impl.Methods.Client.deinit(self.ptr);
+        \\        _ = runtime_impl.Methods.Client.deinit(self.ptr) catch {};
         \\        self.ptr = zeroPointer(*anyopaque);
         \\    }
         \\

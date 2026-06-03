@@ -184,7 +184,7 @@ fn emitGetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *co
         const return_ty = try bridgeTypeOwned(allocator, schema, field.type_expr, is_const);
         defer allocator.free(return_ty);
 
-        try writer.print("    pub inline fn get{s}(self: *const @This()) {s} {{\n", .{ suffix, return_ty });
+        try writer.print("    pub inline fn get{s}(self: *const @This()) BridgeError!{s} {{\n", .{ suffix, return_ty });
         try emitGetterBody(writer, allocator, schema, field.type_expr, field_name, is_const);
         try writer.writeAll("    }\n\n");
     }
@@ -200,7 +200,7 @@ fn emitUnionGetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema
         const return_ty = try bridgeTypeOwned(allocator, schema, field.type_expr, is_const);
         defer allocator.free(return_ty);
 
-        try writer.print("    pub inline fn get{s}(self: *const @This()) {s} {{\n", .{ suffix, return_ty });
+        try writer.print("    pub inline fn get{s}(self: *const @This()) BridgeError!{s} {{\n", .{ suffix, return_ty });
         if (field.type_expr.* == .named and utils.classifyNamed(schema, field.type_expr.named) == .struct_decl) {
             try writer.print("        if (sourceIsInstance(self.source, \"{s}\")) return {s}.fromBorrowedSource(self.source);\n", .{ field.type_expr.named, return_ty });
         }
@@ -250,7 +250,7 @@ fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
     , .{ name, name, name, name });
     if (is_opaque) {
         try writer.writeAll("    pub inline fn deinit(self: *@This()) void {\n        releaseSource(self.source, self.owned);\n        self.* = .fromBorrowedObject(null);\n    }\n\n");
-        try writer.writeAll("    pub inline fn getPtr(self: *const @This()) *anyopaque {\n        return fieldPtr(self.source, \"ptr\");\n    }\n\n");
+        try writer.writeAll("    pub inline fn getPtr(self: *const @This()) BridgeError!*anyopaque {\n        return try fieldPtr(self.source, \"ptr\");\n    }\n\n");
     } else {
         try writer.writeAll("    pub inline fn deinit(self: *@This(), allocator: std.mem.Allocator) void {\n        _ = allocator;\n        releaseSource(self.source, self.owned);\n        self.* = .fromBorrowedObject(null);\n    }\n\n");
         try emitGetters(writer, allocator, schema, fields, false);
@@ -278,7 +278,7 @@ fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
         \\
     , .{ name, name, name, name });
     if (is_opaque) {
-        try writer.writeAll("    pub inline fn getPtr(self: @This()) *anyopaque {\n        return fieldPtr(self.source, \"ptr\");\n    }\n\n");
+        try writer.writeAll("    pub inline fn getPtr(self: @This()) BridgeError!*anyopaque {\n        return try fieldPtr(self.source, \"ptr\");\n    }\n\n");
         try writer.writeAll("    pub inline fn setPtr(self: @This(), ptr: *anyopaque) BridgeError!void {\n        try setFieldPtr(self.source, \"ptr\", ptr);\n    }\n\n");
     } else {
         try emitGetters(writer, allocator, schema, fields, false);
@@ -296,7 +296,7 @@ fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
         \\
     , .{ name, name });
     if (is_opaque) {
-        try writer.writeAll("    pub inline fn getPtr(self: @This()) *anyopaque {\n        return fieldPtr(self.source, \"ptr\");\n    }\n\n");
+        try writer.writeAll("    pub inline fn getPtr(self: @This()) BridgeError!*anyopaque {\n        return try fieldPtr(self.source, \"ptr\");\n    }\n\n");
     } else {
         try emitGetters(writer, allocator, schema, fields, true);
     }
@@ -484,6 +484,13 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
+    \\fn setTypeError(message: [*:0]const u8) void {
+    \\    const state = python.PyGILState_Ensure();
+    \\    defer python.PyGILState_Release(state);
+    \\    python.PyErr_SetString(python.PyExc_TypeError, message);
+    \\}
+    \\
+    \\
     \\fn pyNewRef(object: ?*python.PyObject) ?*python.PyObject {
     \\    if (object == null) return null;
     \\
@@ -560,17 +567,15 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    const attr = python.PyObject_GetAttrString(@ptrCast(object), name.ptr);
     \\    if (attr != null) return @ptrCast(attr);
     \\    python.PyErr_Clear();
-    \\
-    \\
-    \\    const item = python.PyMapping_GetItemString(@ptrCast(object), name.ptr);
-    \\    if (item != null) return @ptrCast(item);
-    \\    python.PyErr_Clear();
     \\    return null;
     \\}
     \\
     \\
     \\fn objectGetRequiredOwned(object: ?*python.PyObject, name: [:0]const u8) BridgeError!?*python.PyObject {
-    \\    return (try objectGetOptionalOwned(object, name)) orelse error.PythonError;
+    \\    return (try objectGetOptionalOwned(object, name)) orelse {
+    \\        setTypeError("expected object with required mzproto field");
+    \\        return error.PythonError;
+    \\    };
     \\}
     \\
     \\
@@ -583,8 +588,6 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\
     \\
     \\    if (python.PyObject_SetAttrString(@ptrCast(object), name.ptr, @ptrCast(value)) == 0) return;
-    \\    python.PyErr_Clear();
-    \\    if (python.PyMapping_SetItemString(@ptrCast(object), name.ptr, @ptrCast(value)) == 0) return;
     \\    return error.PythonError;
     \\}
     \\
@@ -665,18 +668,17 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
-    \\pub fn sourceLength(source: ValueSource) usize {
-    \\    const object = sourceGetOptionalOwned(source) catch return 0;
+    \\pub fn sourceLength(source: ValueSource) BridgeError!usize {
+    \\    const object = try sourceGetRequiredOwned(source);
     \\    defer pyDecref(object);
-    \\    if (object == null) return 0;
+    \\    if (object == null) return error.PythonError;
     \\
     \\
     \\    const state = python.PyGILState_Ensure();
     \\    defer python.PyGILState_Release(state);
     \\    const size = python.PyObject_Length(@ptrCast(object));
     \\    if (size < 0) {
-    \\        python.PyErr_Clear();
-    \\        return 0;
+    \\        return error.PythonError;
     \\    }
     \\    return @intCast(size);
     \\}
@@ -912,103 +914,106 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
-    \\fn pyBoolOrDefault(object: ?*python.PyObject, default: bool) bool {
-    \\    if (object == null or pyIsNone(object)) return default;
+    \\fn pyBoolFromObject(object: ?*python.PyObject) BridgeError!bool {
+    \\    if (object == null or pyIsNone(object)) {
+    \\        setTypeError("expected bool");
+    \\        return error.PythonError;
+    \\    }
     \\
     \\
     \\    const state = python.PyGILState_Ensure();
     \\    defer python.PyGILState_Release(state);
     \\    const value = python.PyObject_IsTrue(@ptrCast(object));
-    \\    if (value < 0) {
-    \\        python.PyErr_Clear();
-    \\        return default;
-    \\    }
+    \\    if (value < 0) return error.PythonError;
     \\    return value != 0;
     \\}
     \\
     \\
-    \\fn pyOptionalBool(object: ?*python.PyObject) ?bool {
+    \\fn pyOptionalBool(object: ?*python.PyObject) BridgeError!?bool {
     \\    if (object == null or pyIsNone(object)) return null;
-    \\    return pyBoolOrDefault(object, false);
+    \\    return try pyBoolFromObject(object);
     \\}
     \\
     \\
-    \\fn pyI32OrDefault(object: ?*python.PyObject, default: i32) i32 {
-    \\    if (object == null or pyIsNone(object)) return default;
-    \\
-    \\
-    \\    const state = python.PyGILState_Ensure();
-    \\    defer python.PyGILState_Release(state);
-    \\    const value = python.PyLong_AsLong(@ptrCast(object));
-    \\    if (value == -1 and python.PyErr_Occurred() != null) {
-    \\        python.PyErr_Clear();
-    \\        return default;
+    \\fn pyI64FromObject(object: ?*python.PyObject) BridgeError!i64 {
+    \\    if (object == null or pyIsNone(object)) {
+    \\        setTypeError("expected int");
+    \\        return error.PythonError;
     \\    }
-    \\    return @intCast(value);
-    \\}
-    \\
-    \\
-    \\fn pyI64OrDefault(object: ?*python.PyObject, default: i64) i64 {
-    \\    if (object == null or pyIsNone(object)) return default;
     \\
     \\
     \\    const state = python.PyGILState_Ensure();
     \\    defer python.PyGILState_Release(state);
     \\    const value = python.PyLong_AsLongLong(@ptrCast(object));
-    \\    if (value == -1 and python.PyErr_Occurred() != null) {
-    \\        python.PyErr_Clear();
-    \\        return default;
+    \\    if (value == -1 and python.PyErr_Occurred() != null) return error.PythonError;
+    \\    return @intCast(value);
+    \\}
+    \\
+    \\
+    \\fn pyI32FromObject(object: ?*python.PyObject) BridgeError!i32 {
+    \\    const value = try pyI64FromObject(object);
+    \\    if (value < std.math.minInt(i32) or value > std.math.maxInt(i32)) {
+    \\        setTypeError("int out of range for i32");
+    \\        return error.PythonError;
     \\    }
     \\    return @intCast(value);
     \\}
     \\
     \\
-    \\fn pyU32OrDefault(object: ?*python.PyObject, default: u32) u32 {
-    \\    if (object == null or pyIsNone(object)) return default;
+    \\fn pyU64FromObject(object: ?*python.PyObject) BridgeError!u64 {
+    \\    if (object == null or pyIsNone(object)) {
+    \\        setTypeError("expected int");
+    \\        return error.PythonError;
+    \\    }
     \\
     \\
     \\    const state = python.PyGILState_Ensure();
     \\    defer python.PyGILState_Release(state);
-    \\    const value = python.PyLong_AsUnsignedLongLongMask(@ptrCast(object));
-    \\    if (python.PyErr_Occurred() != null) {
-    \\        python.PyErr_Clear();
-    \\        return default;
+    \\    const value = python.PyLong_AsUnsignedLongLong(@ptrCast(object));
+    \\    if (python.PyErr_Occurred() != null) return error.PythonError;
+    \\    return value;
+    \\}
+    \\
+    \\
+    \\fn pyU32FromObject(object: ?*python.PyObject) BridgeError!u32 {
+    \\    const value = try pyU64FromObject(object);
+    \\    if (value > std.math.maxInt(u32)) {
+    \\        setTypeError("int out of range for u32");
+    \\        return error.PythonError;
     \\    }
     \\    return @intCast(value);
     \\}
     \\
     \\
-    \\fn pyU64OrDefault(object: ?*python.PyObject, default: u64) u64 {
-    \\    if (object == null or pyIsNone(object)) return default;
-    \\
-    \\
-    \\    const state = python.PyGILState_Ensure();
-    \\    defer python.PyGILState_Release(state);
-    \\    const value = python.PyLong_AsUnsignedLongLongMask(@ptrCast(object));
-    \\    if (python.PyErr_Occurred() != null) {
-    \\        python.PyErr_Clear();
-    \\        return default;
+    \\fn pyEnumFromObject(comptime T: type, object: ?*python.PyObject) BridgeError!T {
+    \\    const raw = try pyU64FromObject(object);
+    \\    inline for (@typeInfo(T).@"enum".fields) |field| {
+    \\        if (raw == field.value) return @enumFromInt(raw);
     \\    }
-    \\    return @intCast(value);
+    \\    setTypeError("invalid enum value");
+    \\    return error.PythonError;
     \\}
     \\
     \\
-    \\fn pyPtrOrZero(object: ?*python.PyObject) *anyopaque {
-    \\    if (object == null or pyIsNone(object)) return @ptrFromInt(0);
+    \\fn pyPtrFromObject(object: ?*python.PyObject) BridgeError!*anyopaque {
+    \\    if (object == null or pyIsNone(object)) {
+    \\        setTypeError("expected pointer");
+    \\        return error.PythonError;
+    \\    }
     \\
     \\
     \\    const state = python.PyGILState_Ensure();
     \\    defer python.PyGILState_Release(state);
     \\    const ptr = python.PyLong_AsVoidPtr(@ptrCast(object));
-    \\    if (ptr == null and python.PyErr_Occurred() != null) {
-    \\        python.PyErr_Clear();
-    \\        return @ptrFromInt(0);
-    \\    }
-    \\    return ptr orelse @ptrFromInt(0);
+    \\    if (ptr == null and python.PyErr_Occurred() != null) return error.PythonError;
+    \\    return ptr orelse {
+    \\        setTypeError("expected pointer");
+    \\        return error.PythonError;
+    \\    };
     \\}
     \\
     \\
-    \\pub fn releaseSource(source: ValueSource, owned: bool) void {
+    \\pub inline fn releaseSource(source: ValueSource, owned: bool) void {
     \\    if (!owned) return;
     \\    switch (source) {
     \\        .direct => |object| pyDecref(object),
@@ -1028,7 +1033,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
-    \\fn bridgeValueToPyOwned(comptime T: type, value: T) BridgeError!?*python.PyObject {
+    \\inline fn bridgeValueToPyOwned(comptime T: type, value: T) BridgeError!?*python.PyObject {
     \\    if (T == bool) return pyObjectFromBool(value);
     \\    if (T == i32) return pyObjectFromI32(value);
     \\    if (T == i64) return pyObjectFromI64(value);
@@ -1040,13 +1045,13 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
-    \\fn pyObjectToBridgeValue(comptime T: type, object: ?*python.PyObject) T {
-    \\    if (T == bool) return pyBoolOrDefault(object, false);
-    \\    if (T == i32) return pyI32OrDefault(object, 0);
-    \\    if (T == i64) return pyI64OrDefault(object, 0);
-    \\    if (T == u32) return pyU32OrDefault(object, 0);
-    \\    if (T == u64) return pyU64OrDefault(object, 0);
-    \\    if (@typeInfo(T) == .@"enum") return @enumFromInt(pyU64OrDefault(object, 0));
+    \\pub inline fn pyObjectToBridgeValue(comptime T: type, object: ?*python.PyObject) BridgeError!T {
+    \\    if (T == bool) return try pyBoolFromObject(object);
+    \\    if (T == i32) return try pyI32FromObject(object);
+    \\    if (T == i64) return try pyI64FromObject(object);
+    \\    if (T == u32) return try pyU32FromObject(object);
+    \\    if (T == u64) return try pyU64FromObject(object);
+    \\    if (@typeInfo(T) == .@"enum") return try pyEnumFromObject(T, object);
     \\    if (@hasDecl(T, "fromOwned")) return T.fromOwned(object);
     \\    @compileError("unsupported Python bridge reverse conversion");
     \\}
@@ -1105,8 +1110,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    }
     \\
     \\
-    \\    pub inline fn size(self: @This()) usize {
-    \\        return sourceLength(self.source);
+    \\    pub inline fn size(self: @This()) BridgeError!usize {
+    \\        return try sourceLength(self.source);
     \\    }
     \\};
     \\
@@ -1215,8 +1220,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    }
     \\
     \\
-    \\    pub inline fn size(self: *const String) usize {
-    \\        return sourceLength(self.source);
+    \\    pub inline fn size(self: *const String) BridgeError!usize {
+    \\        return try sourceLength(self.source);
     \\    }
     \\
     \\
@@ -1274,8 +1279,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    }
     \\
     \\
-    \\    pub inline fn size(self: @This()) usize {
-    \\        return sourceLength(self.source);
+    \\    pub inline fn size(self: @This()) BridgeError!usize {
+    \\        return try sourceLength(self.source);
     \\    }
     \\};
     \\
@@ -1365,8 +1370,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    }
     \\
     \\
-    \\    pub inline fn size(self: *const Bytes) usize {
-    \\        return sourceLength(self.source);
+    \\    pub inline fn size(self: *const Bytes) BridgeError!usize {
+    \\        return try sourceLength(self.source);
     \\    }
     \\
     \\
@@ -1440,8 +1445,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\        }
     \\
     \\
-    \\        pub inline fn size(self: @This()) usize {
-    \\            return sourceLength(self.source);
+    \\        pub inline fn size(self: @This()) BridgeError!usize {
+    \\            return try sourceLength(self.source);
     \\        }
     \\
     \\
@@ -1450,14 +1455,14 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\        }
     \\
     \\
-    \\        pub inline fn get(self: @This(), index: usize) if (@hasDecl(T, "fromOwned")) BridgeError!T else T {
+    \\        pub inline fn get(self: @This(), index: usize) BridgeError!T {
     \\            if (@hasDecl(T, "fromOwned")) {
     \\                const item = try sourceSequenceItemOwned(self.source, index);
-    \\                return pyObjectToBridgeValue(T, item);
+    \\                return try pyObjectToBridgeValue(T, item);
     \\            }
-    \\            const item = sourceSequenceItemOwned(self.source, index) catch return defaultBridgeValue(T);
+    \\            const item = try sourceSequenceItemOwned(self.source, index);
     \\            defer pyDecref(item);
-    \\            return pyObjectToBridgeValue(T, item);
+    \\            return try pyObjectToBridgeValue(T, item);
     \\        }
     \\
     \\
@@ -1535,34 +1540,41 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\        }
     \\
     \\
-    \\        pub inline fn size(self: @This()) usize {
-    \\            return sourceLength(self.source);
+    \\        pub inline fn size(self: @This()) BridgeError!usize {
+    \\            return try sourceLength(self.source);
     \\        }
     \\
     \\
-    \\        pub inline fn get(self: @This(), index: usize) if (@hasDecl(T, "fromBorrowedObject")) BridgeError!ConstListItem(T) else T {
+    \\        pub inline fn get(self: @This(), index: usize) if (@hasDecl(T, "fromBorrowedObject")) BridgeError!ConstListItem(T) else BridgeError!T {
     \\            if (@hasDecl(T, "fromBorrowedObject")) {
     \\                const item = try sourceSequenceItemOwned(self.source, index);
     \\                return ConstListItem(T).fromOwned(item);
     \\            }
-    \\            const item = sourceSequenceItemOwned(self.source, index) catch return defaultBridgeValue(T);
+    \\            const item = try sourceSequenceItemOwned(self.source, index);
     \\            defer pyDecref(item);
-    \\            return pyObjectToBridgeValue(T, item);
+    \\            return try pyObjectToBridgeValue(T, item);
     \\        }
     \\    };
     \\}
     \\
     \\
-    \\pub fn fieldWrapper(comptime T: type, source: ValueSource, name: [:0]const u8) T {
+    \\pub fn fieldWrapper(comptime T: type, source: ValueSource, name: [:0]const u8) BridgeError!T {
     \\    return switch (source) {
     \\        .direct => |object| T.fromBorrowedSource(.{ .attr = .{ .parent = object, .name = name } }),
-    \\        .attr => T.fromOwned(sourceChildOwned(source, name) catch null),
+    \\        .attr => blk: {
+    \\            const value = try sourceChildOwned(source, name);
+    \\            if (value == null) {
+    \\                setTypeError("expected object with required mzproto field");
+    \\                return error.PythonError;
+    \\            }
+    \\            break :blk T.fromOwned(value);
+    \\        },
     \\    };
     \\}
     \\
     \\
-    \\pub fn optionalFieldWrapper(comptime T: type, source: ValueSource, name: [:0]const u8) ?T {
-    \\    const value = sourceChildOwned(source, name) catch return null;
+    \\pub fn optionalFieldWrapper(comptime T: type, source: ValueSource, name: [:0]const u8) BridgeError!?T {
+    \\    const value = try sourceChildOwned(source, name);
     \\    if (value == null or pyIsNone(value)) {
     \\        pyDecref(value);
     \\        return null;
@@ -1571,25 +1583,29 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\}
     \\
     \\
-    \\pub fn fieldValue(comptime T: type, source: ValueSource, name: [:0]const u8) T {
-    \\    const value = sourceChildOwned(source, name) catch return defaultBridgeValue(T);
+    \\pub fn fieldValue(comptime T: type, source: ValueSource, name: [:0]const u8) BridgeError!T {
+    \\    const value = try sourceChildOwned(source, name);
     \\    defer pyDecref(value);
-    \\    return pyObjectToBridgeValue(T, value);
+    \\    if (value == null) {
+    \\        setTypeError("expected object with required mzproto field");
+    \\        return error.PythonError;
+    \\    }
+    \\    return try pyObjectToBridgeValue(T, value);
     \\}
     \\
     \\
-    \\pub fn optionalFieldValue(comptime T: type, source: ValueSource, name: [:0]const u8) ?T {
-    \\    const value = sourceChildOwned(source, name) catch return null;
+    \\pub fn optionalFieldValue(comptime T: type, source: ValueSource, name: [:0]const u8) BridgeError!?T {
+    \\    const value = try sourceChildOwned(source, name);
     \\    defer pyDecref(value);
     \\    if (value == null or pyIsNone(value)) return null;
-    \\    return pyObjectToBridgeValue(T, value);
+    \\    return try pyObjectToBridgeValue(T, value);
     \\}
     \\
     \\
-    \\pub fn fieldPtr(source: ValueSource, name: [:0]const u8) *anyopaque {
-    \\    const value = sourceChildOwned(source, name) catch return @ptrFromInt(0);
+    \\pub fn fieldPtr(source: ValueSource, name: [:0]const u8) BridgeError!*anyopaque {
+    \\    const value = try sourceChildOwned(source, name);
     \\    defer pyDecref(value);
-    \\    return pyPtrOrZero(value);
+    \\    return try pyPtrFromObject(value);
     \\}
     \\
     \\

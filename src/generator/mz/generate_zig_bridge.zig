@@ -198,7 +198,7 @@ fn emitGetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *co
         defer allocator.free(field_expr);
         const wrapped = try getterExprOwned(allocator, schema, field_expr, field.type_expr, is_const);
         defer allocator.free(wrapped);
-        try writer.print("{s}pub inline fn get{s}(self: *const @This()) {s} {{\n", .{ indent, suffix, return_ty });
+        try writer.print("{s}pub inline fn get{s}(self: *const @This()) BridgeError!{s} {{\n", .{ indent, suffix, return_ty });
         try writer.print("{s}    return {s};\n", .{ indent, wrapped });
         try writer.print("{s}}}\n\n", .{indent});
     }
@@ -338,6 +338,8 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\pub const BYTES_ARE_NO_COPY = true;
         \\pub const PREFERRED_STRING_ENCODING: PREFERRED_ENCODING = .utf8;
         \\pub const OBJECTS_ALWAYS_REFERENCED = false;
+        \\
+        \\pub const BridgeError = std.mem.Allocator.Error || error{PythonError};
         \\
         \\pub const MzError = struct {
         \\    code: u32,
@@ -588,7 +590,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\            return .{ .slice = value };
         \\        }
         \\
-        \\        pub inline fn size(self: @This()) usize {
+        \\        pub inline fn size(self: @This()) BridgeError!usize {
         \\            return self.slice.len;
         \\        }
         \\
@@ -596,7 +598,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\            return .{ .slice = self.slice };
         \\        }
         \\
-        \\        pub inline fn get(self: @This(), index: usize) T {
+        \\        pub inline fn get(self: @This(), index: usize) BridgeError!T {
         \\            return wrapBridgeValue(T, self.slice[index]);
         \\        }
         \\
@@ -619,11 +621,11 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\    return struct {
         \\        slice: []const Storage,
         \\
-        \\        pub inline fn size(self: @This()) usize {
+        \\        pub inline fn size(self: @This()) BridgeError!usize {
         \\            return self.slice.len;
         \\        }
         \\
-        \\        pub inline fn get(self: @This(), index: usize) T {
+        \\        pub inline fn get(self: @This(), index: usize) BridgeError!T {
         \\            return wrapBridgeValue(T, self.slice[index]);
         \\        }
         \\    };
