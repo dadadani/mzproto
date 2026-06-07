@@ -19,9 +19,8 @@ fn pythonConfigValue(b: *std.Build, python_exe: []const u8, expr: []const u8) []
     return trimOutput(b.run(&.{ python_exe, "-c", expr }));
 }
 
-fn detectPythonConfig(b: *std.Build) PythonConfig {
-    const python_exe = b.option([]const u8, "python-exe", "Python interpreter used to build the extension") orelse
-        b.findProgram(.{ .names = &.{ "python3", "python" } }) orelse
+fn detectPythonConfig(b: *std.Build, maybe_python_exe: ?[]const u8) PythonConfig {
+    const python_exe = maybe_python_exe orelse b.findProgram(.{ .names = &.{ "python3", "python" } }) orelse
         process.fatal("could not find python3 or python on PATH", .{});
 
     const include_dir = pythonConfigValue(b, python_exe,
@@ -226,6 +225,8 @@ pub fn build(b: *std.Build) void {
 
     const target_lang = b.option(TargetLanguage, "target-language", "Select the language that mzproto should target (default: zig)") orelse TargetLanguage.zig;
 
+    const python_exe = b.option([]const u8, "python-exe", "(Only for Python target) Path of the Python interpreter used to build the extension") orelse null;
+
     const options_module = createMzprotoOptions(b, enable_sqlite, target_lang);
 
     // First of all, we generate the tl api from the .tl scheme. This is the same for all languages we target.
@@ -279,7 +280,7 @@ pub fn build(b: *std.Build) void {
     switch (target_lang) {
         .python => {
             // Detect the python environment in our host
-            const python_cfg = detectPythonConfig(b);
+            const python_cfg = detectPythonConfig(b, python_exe);
             const python_module = createPythonBindings(b, target, optimize, python_cfg);
 
             bridge.addImport("python", python_module);
