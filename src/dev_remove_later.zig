@@ -1,6 +1,5 @@
 const std = @import("std");
 const mzproto = @import("mzproto");
-const zio = @import("zio");
 
 fn unwrapTypeRes(comptime T: type) type {
     switch (@typeInfo(T)) {
@@ -40,10 +39,8 @@ pub fn main(init: std.process.Init) !void {
     //  }
 
     const allocator = init.gpa;
-    const rt = try zio.Runtime.init(allocator, .{ .executors = .auto });
-    const io = rt;
-    //var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
-    defer rt.deinit();
+    var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
+    defer io.deinit();
 
     const config = mzproto.Config{
         .api_hash = "test123",

@@ -318,10 +318,7 @@ pub fn build(b: *std.Build) void {
 
             bridge.addImport("mzproto", public_api);
 
-            const zio = b.dependency("zio", .{
-                .target = target,
-                .optimize = optimize,
-            });
+        
 
             const dev_exe = b.addExecutable(.{
                 .name = "dev",
@@ -335,7 +332,6 @@ pub fn build(b: *std.Build) void {
                 }),
             });
 
-            dev_exe.root_module.addImport("zio", zio.module("zio"));
 
             const install_dev = b.addInstallArtifact(dev_exe, .{});
             b.default_step.dependOn(&install_dev.step);
