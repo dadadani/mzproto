@@ -80,10 +80,41 @@ TestUnion: union {
     sub2: TestSub2,
 }
 
+// The status of client. 
+ClientStatus: enum {
+    // The client is preparing to be ready.
+    // Any function related to authorization or sending/receiveing messages is allowed, but they will be suspended until the client is ready.
+    Starting = 0,
+    // The client is ready, but it needs to be authorized to send messages.
+    WaitingAuthorization = 1,
+    // The client is logging in.
+    LoggingIn = 2,
+    // The client is ready and authorized.
+    Ready = 3,
+    // The client is terminating. Any function calls may be rejected.
+    Terminating = 4,
+}
+
+UpdateClientStatus: struct {
+    status: ClientStatus
+}
+
+Update: union {
+    UpdateClientStatus: UpdateClientStatus,
+}
+
+// Get the next update from the client's queue.
+// If `blocking` is set to true, the function will wait until an update is received.
+nextUpdate: func(blocking: bool): ?Update
+
+// Authenticate using a bot token.
+// Works only if ClientStatus is currently WaitingAuthorization
+authenticateBot: func(token: string): void
+
 // Sends a message (doesn't do anything right now)
 sendMessage: func(text: string): Message
 
 testReturnEnum: func(testfield: list Message): StorageBackend
 
 // Terminates the client instance.
-terminate: sync func(): void
+terminate: func(): void

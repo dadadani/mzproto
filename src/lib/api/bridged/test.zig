@@ -13,8 +13,15 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
 
 pub fn deinit(ptr: *anyopaque) bapi.BridgeError!bapi.Result(void) {
     const self: *Client = @ptrCast(@alignCast(ptr));
+    std.log.debug("return deinit actual funct", .{});
+
     self.deinit();
     return .{ .ok = {} };
+}
+
+pub fn isTerminated(ptr: *anyopaque) bool {
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    return self.terminated.load(.acquire);
 }
 
 pub fn sendMessage(ptr: *anyopaque, text: bapi.ConstString) bapi.BridgeError!bapi.Result(bapi.Message) {
@@ -50,5 +57,10 @@ pub fn testReturnEnum(ptr: *anyopaque, listmes: bapi.ConstList(bapi.Message)) ba
 }
 
 pub fn terminate(ptr: *anyopaque) bapi.BridgeError!bapi.Result(void) {
-    return deinit(ptr);
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    std.log.debug("called terminate", .{});
+    self.terminate(false);
+    std.log.debug("return terminate", .{});
+
+    return .{ .ok = {} };
 }

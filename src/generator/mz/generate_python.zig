@@ -399,12 +399,7 @@ fn emitClientMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
     const has_doc = try emitDocStringIndented(writer, fun.doc, 8);
     _ = has_doc;
     try writer.writeAll("        self._ensure_open()\n");
-    if (std.mem.eql(u8, fun.name, "terminate")) {
-        try writer.print("        _native.{s}(self._native_handle)\n", .{native_name});
-        try writer.writeAll("        self._native_handle = None\n        self._closed = True\n        return None\n");
-    } else {
-        try emitMethodBody(allocator, writer, schema, native_name, fun.params.items, fun.return_type, "self._native_handle", fun.mode == .asynchronous);
-    }
+    try emitMethodBody(allocator, writer, schema, native_name, fun.params.items, fun.return_type, "self._native_handle", fun.mode == .asynchronous);
     try writer.writeAll("\n");
 }
 

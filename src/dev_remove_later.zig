@@ -1,6 +1,37 @@
 const std = @import("std");
 const mzproto = @import("mzproto");
+const zio = @import("zio");
 
+fn unwrapTypeRes(comptime T: type) type {
+    switch (@typeInfo(T)) {
+        .@"union" => |x| {
+            if (x.field_names.len != 2) {
+                @compileError("Type is not a Result");
+            }
+            if (!std.mem.eql(u8, x.field_names[0], "ok")) {
+                @compileError("Type is not a Result");
+            }
+            return x.field_types[0];
+        },
+        else => @compileError("Type is not a result"),
+    }
+}
+
+// andrew, please make compile-time traits!!!!!!!!!!!!!!!!!!!
+fn unwrapResult(result: anytype) unwrapTypeRes(@TypeOf(result)) {
+    switch (result) {
+        .ok => |ok| return ok,
+        .err => |err| std.process.fatal("{s} ({d})", .{ err.message, err.code }),
+    }
+}
+
+fn updatesLoop(allocator: std.mem.Allocator, client: *mzproto.Client) !void {
+    while (unwrapResult(client.nextUpdate(true))) |update| {
+        var update_var = update;
+        defer update_var.deinit(allocator);
+        std.log.info("{any}", .{update});
+    }
+}
 pub fn main(init: std.process.Init) !void {
     //  var allocator = std.heap.DebugAllocator(.{}){};
     //  defer {
@@ -9,8 +40,10 @@ pub fn main(init: std.process.Init) !void {
     //  }
 
     const allocator = init.gpa;
-    var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
-    defer io.deinit();
+    const rt = try zio.Runtime.init(allocator, .{ .executors = .auto });
+    const io = rt;
+    //var io = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
+    defer rt.deinit();
 
     const config = mzproto.Config{
         .api_hash = "test123",
@@ -30,12 +63,11 @@ pub fn main(init: std.process.Init) !void {
     var client = mzproto.Client.init(allocator, io.io(), &config) catch |err| {
         std.process.fatal("error client: {s}", .{@errorName(err)});
     };
-    defer client.deinit();
+    //defer client.deinit();
+    const RETRY_IN = std.Io.Duration.fromMilliseconds(1000);
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = RETRY_IN, .clock = .boot } };
 
-    switch (client.sendMessage("testing123")) {
-        .err => |err| {
-            std.process.fatal("error message: {d} - {s}", .{ err.code, err.message });
-        },
-        .ok => {},
-    }
+    try timeout.sleep(io.io());
+
+    try updatesLoop(allocator, &client);
 }

@@ -134,11 +134,12 @@ fn emitSetterBody(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: 
     }
 }
 
-fn emitCommonOwnedWrapperMethods(writer: *std.Io.Writer, name: []const u8, comptime owned: bool) !void {
+fn emitCommonOwnedWrapperMethods(writer: *std.Io.Writer, name: []const u8, comptime owned: bool, extra_fields: []const u8) !void {
     try writer.writeAll(
         \\    source: ValueSource,
     );
     if (owned) try writer.writeAll("    owned: bool,\n");
+    try writer.writeAll(extra_fields);
     try writer.writeAll("\n");
     if (owned) {
         try writer.print(
@@ -233,10 +234,38 @@ fn emitSetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *co
     }
 }
 
+fn emitUnionSetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *const Parser.Schema, union_name: []const u8, fields: []const Parser.Field) !void {
+    for (fields) |field| {
+        if (field.type_expr.* == .function) continue;
+        const suffix = try utils.pascalCaseOwned(allocator, field.name);
+        defer allocator.free(suffix);
+        const input_ty = try setterTypeOwned(allocator, schema, field.type_expr);
+        defer allocator.free(input_ty);
+
+        try writer.print(
+            \\    pub inline fn set{s}(self: @This(), allocator: std.mem.Allocator, value: {s}) BridgeError!void {{
+            \\        _ = allocator;
+            \\        const object = try bridgeValueToPyOwned({s}, value);
+            \\        if (self.target) |target| {{
+            \\            releaseSource(target.source, target.owned);
+            \\            target.source = .{{ .direct = object }};
+            \\            target.owned = true;
+            \\            return;
+            \\        }}
+            \\        pyDecref(object);
+            \\        setTypeError("cannot mutate borrowed union");
+            \\        return error.PythonError;
+            \\    }}
+            \\
+        , .{ suffix, input_ty, input_ty });
+    }
+    _ = union_name;
+}
+
 fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *const Parser.Schema, name: []const u8, fields: []const Parser.Field, comptime is_opaque: bool, doc: ?[]u8) !void {
     try emitDoc(writer, doc);
     try writer.print("pub const {s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, true);
+    try emitCommonOwnedWrapperMethods(writer, name, true, "");
     try writer.print(
         \\    pub const Plain = @This();
         \\    pub const Ref = Ref{s};
@@ -260,7 +289,7 @@ fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
     try writer.writeAll("};\n\n");
 
     try writer.print("pub const Ref{s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, true);
+    try emitCommonOwnedWrapperMethods(writer, name, true, "");
     try writer.print(
         \\    pub const Plain = {s};
         \\    pub const Ref = @This();
@@ -288,7 +317,7 @@ fn emitObjectWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
     try writer.writeAll("};\n\n");
 
     try writer.print("pub const ConstRef{s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, false);
+    try emitCommonOwnedWrapperMethods(writer, name, false, "");
     try writer.print(
         \\    pub const Plain = {s};
         \\    pub const Ref = Ref{s};
@@ -307,7 +336,7 @@ fn emitUnionWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema
     const name = decl.name;
     try emitDoc(writer, decl.doc);
     try writer.print("pub const {s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, true);
+    try emitCommonOwnedWrapperMethods(writer, name, true, "");
     try writer.print(
         \\    pub const Plain = @This();
         \\    pub const Ref = Ref{s};
@@ -315,7 +344,7 @@ fn emitUnionWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema
         \\
         \\    pub inline fn init(allocator: std.mem.Allocator) BridgeError!{s} {{
         \\        _ = allocator;
-        \\        return .fromOwned(try createDictOwned());
+        \\        return .fromBorrowedObject(null);
         \\    }}
         \\    pub inline fn deinit(self: *@This(), allocator: std.mem.Allocator) void {{
         \\        _ = allocator;
@@ -325,12 +354,14 @@ fn emitUnionWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema
         \\
     , .{ name, name, name });
     try emitUnionGetters(writer, allocator, schema, decl.fields.items, false);
-    try writer.print("    pub inline fn toRef(self: *@This()) Ref{s} {{ return .{{ .source = self.source, .owned = false }}; }}\n", .{name});
+    try writer.print("    pub inline fn toRef(self: *@This()) Ref{s} {{ return .{{ .source = self.source, .owned = false, .target = self }}; }}\n", .{name});
     try writer.print("    pub inline fn toConst(self: *const @This()) ConstRef{s} {{ return .{{ .source = self.source }}; }}\n", .{name});
     try writer.writeAll("};\n\n");
 
     try writer.print("pub const Ref{s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, true);
+    const target_field = try std.fmt.allocPrint(allocator, "    target: ?*{s} = null,\n", .{name});
+    defer allocator.free(target_field);
+    try emitCommonOwnedWrapperMethods(writer, name, true, target_field);
     try writer.print(
         \\    pub const Plain = {s};
         \\    pub const Ref = @This();
@@ -347,12 +378,12 @@ fn emitUnionWrapper(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema
         \\
     , .{ name, name, name, name });
     try emitUnionGetters(writer, allocator, schema, decl.fields.items, false);
-    try emitSetters(writer, allocator, schema, decl.fields.items, decl.fields.items);
+    try emitUnionSetters(writer, allocator, schema, name, decl.fields.items);
     try writer.print("    pub inline fn toConst(self: @This()) ConstRef{s} {{ return .{{ .source = self.source }}; }}\n", .{name});
     try writer.writeAll("};\n\n");
 
     try writer.print("pub const ConstRef{s} = struct {{\n", .{name});
-    try emitCommonOwnedWrapperMethods(writer, name, false);
+    try emitCommonOwnedWrapperMethods(writer, name, false, "");
     try writer.print(
         \\    pub const Plain = {s};
         \\    pub const Ref = Ref{s};
@@ -418,6 +449,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\
     \\pub const STRINGS_ARE_NO_COPY = false;
     \\pub const BYTES_ARE_NO_COPY = false;
+    \\pub const LISTS_INIT_ARE_NO_COPY = false;
     \\pub const PREFERRED_STRING_ENCODING: PreferredEncoding = .utf8;
     \\pub const OBJECTS_ALWAYS_REFERENCED = true;
     \\
@@ -695,17 +727,6 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
     \\    const item = python.PySequence_GetItem(@ptrCast(object), @intCast(index));
     \\    if (item == null) return error.PythonError;
     \\    return @ptrCast(item);
-    \\}
-    \\
-    \\
-    \\pub fn createDictOwned() BridgeError!?*python.PyObject {
-    \\    const state = python.PyGILState_Ensure();
-    \\    defer python.PyGILState_Release(state);
-    \\
-    \\
-    \\    const object = python.PyDict_New();
-    \\    if (object == null) return error.PythonError;
-    \\    return @ptrCast(object);
     \\}
     \\
     \\

@@ -1210,7 +1210,6 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
                     },
                 },
             };
-            std.debug.print("messageeeeeeee: {any}\n", .{message.InvokeWithLayer.query.InitConnection});
 
             break :blk (self.send(io, allocator, message, msg_id, true) catch |err| {
                 if (err == std.Io.Cancelable.Canceled) {

@@ -31,4 +31,25 @@ pub const DcId = packed struct(i32) {
     }
 };
 
+pub fn detectMigrateError(err_message: []const u8) ?u8 {
+    if (std.mem.startsWith(u8, err_message, "FILE_MIGRATE_")) {
+        return std.fmt.parseInt(u8, err_message["FILE_MIGRATE_".len..], 10) catch @panic("unexpected fail convert dc");
+    }
 
+    if (std.mem.startsWith(u8, err_message, "NETWORK_MIGRATE_")) {
+        return std.fmt.parseInt(u8, err_message["NETWORK_MIGRATE_".len..], 10) catch @panic("unexpected fail convert dc");
+    }
+
+    if (std.mem.startsWith(u8, err_message, "PHONE_MIGRATE_")) {
+        return std.fmt.parseInt(u8, err_message["PHONE_MIGRATE_".len..], 10) catch @panic("unexpected fail convert dc");
+    }
+
+    if (std.mem.startsWith(u8, err_message, "STATS_MIGRATE_")) {
+        return std.fmt.parseInt(u8, err_message["STATS_MIGRATE_".len..], 10) catch @panic("unexpected fail convert dc");
+    }
+
+    if (std.mem.startsWith(u8, err_message, "USER_MIGRATE_")) {
+        return std.fmt.parseInt(u8, err_message["USER_MIGRATE_".len..], 10) catch @panic("unexpected fail convert dc");
+    }
+    return null;
+}

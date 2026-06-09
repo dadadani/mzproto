@@ -68,7 +68,7 @@ fn emitFunctionParams(allocator: std.mem.Allocator, writer: *std.Io.Writer, sche
     }
 
     for (params) |param| {
-        const ty = try utils.zigTypeOwned(allocator, schema, param.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, param.type_expr, true);
         defer allocator.free(ty);
 
         if (!first) try writer.writeAll(", ");
@@ -87,7 +87,7 @@ fn emitUnusedParams(writer: *std.Io.Writer, params: []const Parser.Parameter, re
 }
 
 fn emitOkFallback(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema, return_type: *const Parser.TypeExpr) !void {
-    const ty = try utils.zigTypeOwned(allocator, schema, return_type);
+    const ty = try utils.zigTypeOwned(allocator, schema, return_type, true);
     defer allocator.free(ty);
 
     if (return_type.* == .named and utils.classifyNamed(schema, return_type.named) == .builtin_void) {
@@ -156,9 +156,9 @@ fn runtimeBridgeListTypeOwned(allocator: std.mem.Allocator, schema: *const Parse
 fn runtimeBridgeResultExprOwned(allocator: std.mem.Allocator, schema: *const Parser.Schema, expr: []const u8, type_expr: *const Parser.TypeExpr) ![]u8 {
     return switch (type_expr.*) {
         .optional => |child| blk: {
-            const inner = try runtimeBridgeResultExprOwned(allocator, schema, "value", child);
+            const inner = try runtimeBridgeResultExprOwned(allocator, schema, "value_opt", child);
             defer allocator.free(inner);
-            break :blk try std.fmt.allocPrint(allocator, "if ({s}) |value| {s} else null", .{ expr, inner });
+            break :blk try std.fmt.allocPrint(allocator, "if ({s}) |value_opt| {s} else null", .{ expr, inner });
         },
         .reference => |child| try runtimeBridgeResultExprOwned(allocator, schema, expr, child),
         .list => try std.fmt.allocPrint(allocator, "{s}.slice", .{expr}),
@@ -308,7 +308,7 @@ fn emitManualDispatch(writer: *std.Io.Writer, module_alias: []const u8, owner_na
 
 fn emitStructMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema, decl_name: []const u8, field: Parser.Field) !void {
     const signature = field.type_expr.function;
-    const return_ty = try utils.zigTypeOwned(allocator, schema, signature.return_type);
+    const return_ty = try utils.zigTypeOwned(allocator, schema, signature.return_type, true);
     defer allocator.free(return_ty);
 
     try emitDocIndented(writer, field.doc, 4);
@@ -321,7 +321,7 @@ fn emitStructMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
 }
 
 fn emitTopLevelFunction(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema, fun: Parser.FunctionDecl) !void {
-    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type);
+    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type, true);
     defer allocator.free(return_ty);
 
     try emitDoc(writer, fun.doc);
@@ -333,7 +333,7 @@ fn emitTopLevelFunction(allocator: std.mem.Allocator, writer: *std.Io.Writer, sc
 }
 
 fn emitOpaqueMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema, decl_name: []const u8, fun: Parser.FunctionDecl) !void {
-    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type);
+    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type, true);
     defer allocator.free(return_ty);
 
     try emitDocIndented(writer, fun.doc, 4);
@@ -345,7 +345,7 @@ fn emitOpaqueMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
 }
 
 fn emitClientMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const Parser.Schema, fun: Parser.FunctionDecl) !void {
-    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type);
+    const return_ty = try utils.zigTypeOwned(allocator, schema, fun.return_type, false);
     defer allocator.free(return_ty);
 
     try emitDocIndented(writer, fun.doc, 4);
@@ -453,7 +453,7 @@ fn emitStructDecl(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: 
 
         const snake = try utils.snakeCaseOwned(allocator, field.name);
         defer allocator.free(snake);
-        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr, true);
         defer allocator.free(ty);
 
         try emitDocIndented(writer, field.doc, 4);
@@ -481,7 +481,7 @@ fn emitStructDecl(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: 
         if (field.type_expr.* == .function) continue;
         const snake = try utils.snakeCaseOwned(allocator, field.name);
         defer allocator.free(snake);
-        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr, true);
         defer allocator.free(ty);
         try writer.print("        self.{s} = initDefault({s});\n", .{ snake, ty });
     }
@@ -492,7 +492,7 @@ fn emitStructDecl(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: 
         if (field.type_expr.* == .function) continue;
         const snake = try utils.snakeCaseOwned(allocator, field.name);
         defer allocator.free(snake);
-        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr, true);
         defer allocator.free(ty);
         try writer.print("        deinitOwnedValue({s}, &self.{s}, allocator);\n", .{ ty, snake });
     }
@@ -529,13 +529,13 @@ fn emitUnionDecl(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *
     try emitDoc(writer, decl.doc);
     try writer.print("pub const {s} = union(enum) {{\n", .{decl.name});
     for (decl.fields.items) |field| {
-        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr, true);
         defer allocator.free(ty);
         try emitDocIndented(writer, field.doc, 4);
         try writer.print("    {s}: {s},\n", .{ field.name, ty });
     }
     if (decl.fields.items.len > 0) {
-        const first_ty = try utils.zigTypeOwned(allocator, schema, decl.fields.items[0].type_expr);
+        const first_ty = try utils.zigTypeOwned(allocator, schema, decl.fields.items[0].type_expr, true);
         defer allocator.free(first_ty);
         try writer.print("\n    pub fn init() @This() {{\n        return .{{ .{s} = initDefault({s}) }};\n    }}\n", .{ decl.fields.items[0].name, first_ty });
     } else {
@@ -543,7 +543,7 @@ fn emitUnionDecl(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *
     }
     try writer.writeAll("\n    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {\n        switch (self.*) {\n");
     for (decl.fields.items) |field| {
-        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr);
+        const ty = try utils.zigTypeOwned(allocator, schema, field.type_expr, true);
         defer allocator.free(ty);
         try writer.print("            .{s} => |*value| deinitOwnedValue({s}, value, allocator),\n", .{ field.name, ty });
     }
@@ -598,10 +598,31 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\        ok: T,
         \\        err: MzError,
         \\
-        \\        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        \\
+        \\        pub inline fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         \\            switch (self.*) {
         \\                .err => |*err| err.deinit(allocator),
-        \\                .ok => |*ok| if (hasDeinit(T)) ok.deinit(allocator),
+        \\                .ok => |*ok| {
+        \\                    if (hasDeinit(T)) ok.deinit(allocator);
+        \\                    switch (@typeInfo(T)) {
+        \\                        .pointer => |ptr| {
+        \\                            switch (ptr.size) {
+        \\                                .one => {
+        \\                                    allocator.destroy(ok);
+        \\                                },
+        \\                                .slice => {
+        \\                                    defer allocator.free(ok);
+        \\                                    if (hasDeinit(ptr.child)) {
+        \\                                        for (ok) |item| {
+        \\                                            item.deinit(allocator);
+        \\                                        }
+        \\                                    }
+        \\                                },
+        \\                                else => @compileError("unsupported")
+        \\                            }
+        \\                        },
+        \\                    }
+        \\                },
         \\            }
         \\        }
         \\    };

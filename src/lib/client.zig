@@ -42,6 +42,67 @@ fn storageBackend(orig: bapi.StorageBackend) Storage.Enum {
 allocator: std.mem.Allocator,
 io: std.Io,
 client_manager: ClientManager,
+group: std.Io.Group = .init,
+terminated: std.atomic.Value(bool) = .init(false),
+
+pub fn checkWorker(self: *Client, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
+    while (true) {
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .boot } };
+        try timeout.sleep(io);
+
+        self.client_manager.dispatcher.check(allocator, io) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return;
+            }
+            log.warn("dispatcher.check failed: {s}", .{@errorName(err)});
+            continue;
+        };
+    }
+}
+
+pub fn backgroundInit(self: *Client, allocator: std.mem.Allocator, io: std.Io, stored_auth_key: bool) std.Io.Cancelable!void {
+    self.client_manager.pushClientStatus(allocator, io, .starting);
+    const retry: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .boot } };
+    {
+        const status: ?bapi.ClientStatus = status: {
+            if (stored_auth_key) {
+                const logged_in = brk: while (true) {
+                    // this is required because otherwise `probeLoggedIn` would get stuck waiting for the dispatcher to switch to the dc it needs
+                    self.client_manager.dispatcher.ignite(allocator, io) catch |err| {
+                        if (err == std.Io.Cancelable.Canceled) {
+                            return std.Io.Cancelable.Canceled;
+                        }
+                        log.warn("Failed to ignite dispatcher: {s} - Retrying in 1 sec", .{@errorName(err)});
+                        try retry.sleep(io);
+                        continue;
+                    };
+                    const logged_in = self.client_manager.probeLoggedIn(allocator, io) catch |err| {
+                        if (err == std.Io.Cancelable.Canceled) {
+                            return std.Io.Cancelable.Canceled;
+                        }
+                        log.warn("Failed to ignite dispatcher: {s} - Retrying in 1 sec", .{@errorName(err)});
+                        try retry.sleep(io);
+                        continue;
+                    };
+                    break :brk logged_in;
+                };
+                if (logged_in) {
+                    break :status .ready;
+                } else {
+                    break :status .waiting_authorization;
+                }
+            } else {
+                break :status .waiting_authorization;
+            }
+        };
+
+        if (status) |stat| {
+            self.client_manager.pushClientStatus(allocator, io, stat);
+        }
+    }
+
+    //
+}
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfig) !*Client {
     log.info("mzproto version {s}", .{CompileOptions.VERSION});
@@ -61,20 +122,21 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
             allocator.free(storage_dst);
         }
     }
+    log.debug("init storage", .{});
 
     var storage = try Storage.init(allocator, io, storage_backend, storage_dst);
     errdefer storage.deinit(allocator, io);
 
-    const dc_id, const dc_switch_when_ready: ?utils.DcId = dc: {
+    const dc_id, const dc_switch_when_ready: ?utils.DcId, const stored_auth_key = dc: {
         if (try storage.getPreferredDC(io)) |preferred_dc| {
             if (connector.isAvailable(io, preferred_dc)) {
-                break :dc .{ preferred_dc, null };
+                break :dc .{ preferred_dc, null, true };
             }
 
-            break :dc .{ connector.pickFirstDc(io, preferred_dc.testmode), preferred_dc };
+            break :dc .{ connector.pickFirstDc(io, preferred_dc.testmode), preferred_dc, true };
         }
 
-        break :dc .{ connector.pickFirstDc(io, (try config.getTestmode()) orelse false), null };
+        break :dc .{ connector.pickFirstDc(io, (try config.getTestmode()) orelse false), null, false };
     };
 
     const self = try allocator.create(Client);
@@ -119,30 +181,26 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
     //TODO: figure out language packs
     const lang_pack = try allocator.dupe(u8, "");
     errdefer allocator.free(lang_pack);
+    log.debug("self define", .{});
 
     self.* = .{
         .allocator = allocator,
         .io = io,
-        .client_manager = .{
-            .session_info = .{
-                .api_id = try config.getApiId(),
-                .api_hash = api_hash,
-                .app_version = app_version,
-                .device_model = device_model,
-                .system_version = system_version,
-                .lang_code = lang_code,
-                .system_lang_code = system_lang_code,
-                .lang_pack = lang_pack,
-            },
-            .internal = .{
-                .current_dc = dc_id,
-                .target_dc = dc_switch_when_ready,
-            },
-            .dispatcher = undefined,
-
-            .storage = storage,
-            .transport_connector = connector,
-        },
+        .client_manager = .{ .session_info = .{
+            .api_id = try config.getApiId(),
+            .api_hash = api_hash,
+            .app_version = app_version,
+            .device_model = device_model,
+            .system_version = system_version,
+            .lang_code = lang_code,
+            .system_lang_code = system_lang_code,
+            .lang_pack = lang_pack,
+        }, .internal = .{
+            .current_dc = dc_id,
+            .target_dc = dc_switch_when_ready,
+            .switch_dc_event = if (dc_switch_when_ready == null) .is_set else .unset,
+            .client_status = .starting,
+        }, .dispatcher = undefined, .storage = storage, .transport_connector = connector, .updates_manager = undefined },
     };
 
     self.client_manager.dispatcher = .{
@@ -152,13 +210,34 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
         .storage = &self.client_manager.storage,
     };
 
-    const r = try self.client_manager.probeLoggedIn(allocator, io);
-    std.debug.print("aaar: {}", .{r});
+    self.client_manager.updates_manager.init();
+
+    log.debug("initalizing worker group", .{});
+
+    try self.group.concurrent(io, backgroundInit, .{ self, allocator, io, stored_auth_key });
+    try self.group.concurrent(io, checkWorker, .{ self, allocator, io });
     return self;
+}
+
+pub fn terminate(self: *Client, comptime is_deinit: bool) void {
+    if (self.terminated.load(.acquire)) return;
+
+    log.info("Terminating", .{});
+    self.terminated.store(true, .release);
+    if (!is_deinit) {
+        self.client_manager.pushClientStatus(self.allocator, self.io, .terminating);
+    }
+    log.debug("canceling worker group", .{});
+    self.group.cancel(self.io);
+    log.debug("deinit client manager", .{});
+    self.client_manager.deinit(self.allocator, self.io, if (is_deinit) true else false);
 }
 
 pub fn deinit(self: *Client) void {
     log.info("Shutting down", .{});
-    self.client_manager.deinit(self.allocator, self.io);
+
+    self.terminate(true);
+    log.debug("deinit self", .{});
     self.allocator.destroy(self);
+    log.debug("done", .{});
 }

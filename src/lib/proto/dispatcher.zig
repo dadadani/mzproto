@@ -78,6 +78,24 @@ fn createPools(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: 
     return pools;
 }
 
+/// Forces the creation of the pools for the main dc if they don't exist
+pub fn ignite(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io) !void {
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+    if (self.map.get(self.main_dc) == null) {
+        try self.map.ensureUnusedCapacity(allocator, 1);
+        const pools = try self.createPools(allocator, io, self.main_dc);
+        errdefer pools.deinit(allocator, io, false);
+        // TODO: implement tmp_sessions support
+        try pools.main.setMaxSessions(io, 1);
+        try pools.main.setMinSessions(allocator, io, if (self.main_dc == self.main_dc) 1 else 0);
+
+        try pools.media.setMaxSessions(io, 5);
+        try pools.media.setMinSessions(allocator, io, 0);
+        self.map.putAssumeCapacity(self.main_dc, pools);
+    }
+}
+/// Sends a message to the given DC.
 pub fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !Deserialized {
     const pool = blk: {
         try self.mutex.lock(io);
@@ -134,6 +152,17 @@ pub fn setMainDc(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc
     }
 
     self.main_dc = dc;
+}
+
+pub fn check(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io) !void {
+    try self.mutex.lock(io);
+    defer self.mutex.unlock(io);
+
+    var it = self.map.iterator();
+    while (it.next()) |pools| {
+        try pools.value_ptr.*.main.check(allocator, io);
+        try pools.value_ptr.*.media.check(allocator, io);
+    }
 }
 
 pub fn deinit(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, graceful: bool) void {

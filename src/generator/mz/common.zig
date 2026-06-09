@@ -133,23 +133,31 @@ pub fn goNameOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub fn zigTypeOwned(allocator: std.mem.Allocator, schema: *const Parser.Schema, type_expr: *const Parser.TypeExpr) ![]u8 {
+pub fn zigTypeOwned(allocator: std.mem.Allocator, schema: *const Parser.Schema, type_expr: *const Parser.TypeExpr, comptime const_ref: bool) ![]u8 {
     switch (type_expr.*) {
         //.optional => |child| return cTypeOwned(allocator, schema, child),
         .optional => |child| {
-            const ty = try zigTypeOwned(allocator, schema, child);
+            const ty = try zigTypeOwned(allocator, schema, child, const_ref);
             defer allocator.free(ty);
             return std.fmt.allocPrint(allocator, "?{s}", .{ty});
         },
         .reference => |child| {
-            const ty = try zigTypeOwned(allocator, schema, child);
+            const ty = try zigTypeOwned(allocator, schema, child, const_ref);
             defer allocator.free(ty);
-            return std.fmt.allocPrint(allocator, "*const {s}", .{ty});
+            if (const_ref) {
+                return std.fmt.allocPrint(allocator, "*const {s}", .{ty});
+            } else {
+                return std.fmt.allocPrint(allocator, "*{s}", .{ty});
+            }
         },
         .list => |child| {
-            const ty = try zigTypeOwned(allocator, schema, child);
+            const ty = try zigTypeOwned(allocator, schema, child, const_ref);
             defer allocator.free(ty);
-            return std.fmt.allocPrint(allocator, "[]const {s}", .{ty});
+            if (const_ref) {
+                return std.fmt.allocPrint(allocator, "[]const {s}", .{ty});
+            } else {
+                return std.fmt.allocPrint(allocator, "[]{s}", .{ty});
+            }
         },
         .function => return allocator.dupe(u8, "void"),
         .named => |name| switch (classifyNamed(schema, name)) {

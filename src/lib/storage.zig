@@ -60,11 +60,11 @@ pub const Storage = union(enum) {
         return dc_id;
     }
 
-    pub fn setPreferredDC(self: *const Storage, io: std.Io, dc_id: utils.DcId) void {
+    pub fn setPreferredDC(self: *Storage, io: std.Io, dc_id: utils.DcId) Error!void {
         const dc_id_int: i32 = if (!dc_id.valid) 0 else dc_id.int();
 
         switch (self.*) {
-            inline else => |x| {
+            inline else => |*x| {
                 return x.setPreferredDC(io, dc_id_int);
             },
         }

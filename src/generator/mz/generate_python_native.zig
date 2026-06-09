@@ -237,6 +237,7 @@ fn emitPyObjectValue(writer: *std.Io.Writer, allocator: std.mem.Allocator, schem
         .named => |name| switch (utils.classifyNamed(schema, name)) {
             .builtin_void => {
                 try writeIndent(writer, indent);
+                try writer.print("_ = {s};\n", .{value_expr});
                 try writer.print("const {s}: ?*python.PyObject = pyNone();\n", .{out_name});
             },
             .builtin_bool => {
@@ -397,20 +398,9 @@ fn emitClientOperation(writer: *std.Io.Writer, allocator: std.mem.Allocator, sch
     }
     try writer.writeAll(") == 0) {\n        return null;\n    }\n\n");
     try writer.writeAll("    const client = nativeClientFromHandle(handle) orelse return null;\n");
-    if (std.mem.eql(u8, fun.name, "terminate")) {
-        try writer.writeAll(
-            "    _ = client;\n" ++
-                "    const handle_object = clientHandleFromObject(handle) orelse return null;\n" ++
-                "    closeClientHandle(handle_object, true) catch {\n" ++
-                "        setNativeError(\"failed to terminate mzproto client\");\n" ++
-                "        return null;\n" ++
-                "    };\n" ++
-                "    return pyNone();\n" ++
-                "}\n\n",
-        );
-        return;
+    if (!std.mem.eql(u8, fun.name, "terminate")) {
+        try writer.writeAll("    if (runtime_impl.Methods.Client.isTerminated(client.ptr)) {\n        setNativeError(\"mzproto client is shutting down\");\n        return null;\n    }\n");
     }
-
     for (fun.params.items) |param| {
         const name = try pythonIdentifierOwned(allocator, param.name);
         defer allocator.free(name);
@@ -478,15 +468,17 @@ fn emitAsyncClientOperation(writer: *std.Io.Writer, allocator: std.mem.Allocator
         defer allocator.free(name);
         try writer.print("    defer pyDecref({s}_object);\n", .{name});
     }
+    if (!std.mem.eql(u8, fun.name, "terminate")) {
+        try writer.writeAll("    if (runtime_impl.Methods.Client.isTerminated(client.ptr)) {\n        scheduleFutureRuntimeError(loop, future, \"mzproto client is shutting down\");\n        return;\n    }\n");
+    }
     try emitBridgeArgsFromObjects(writer, allocator, schema, fun.params.items);
-    try writer.writeAll("    const bridge_state = python.PyGILState_Ensure();\n");
     try writer.print("    const result = runtime_impl.Methods.Client.{s}(client.ptr", .{fun.name});
     for (fun.params.items) |param| {
         const name = try pythonIdentifierOwned(allocator, param.name);
         defer allocator.free(name);
         try writer.print(", bridge_{s}", .{name});
     }
-    try writer.writeAll(") catch {\n        const exception = takeCurrentExceptionOwned(\"mzproto bridge error\") orelse {\n            python.PyGILState_Release(bridge_state);\n            scheduleFutureRuntimeError(loop, future, \"mzproto bridge error\");\n            return;\n        };\n        python.PyGILState_Release(bridge_state);\n        scheduleFutureExceptionObject(loop, future, exception);\n        return;\n    };\n    python.PyGILState_Release(bridge_state);\n");
+    try writer.writeAll(") catch {\n        const exception = takeCurrentExceptionOwned(\"mzproto bridge error\") orelse {\n            scheduleFutureRuntimeError(loop, future, \"mzproto bridge error\");\n            return;\n        };\n        scheduleFutureExceptionObject(loop, future, exception);\n        return;\n    };\n");
     try writer.writeAll("    switch (result) {\n");
     try writer.print("        .ok => |value| {{\n            const state = python.PyGILState_Ensure();\n            const object = {s}ResultToPy(value);\n            python.PyGILState_Release(state);\n            if (object == null) {{\n                scheduleFutureRuntimeError(loop, future, \"failed to convert mzproto result\");\n                return;\n            }}\n            scheduleFutureResult(loop, future, object);\n        }},\n", .{py_func});
     try writer.writeAll("        .err => |err| {\n            const exception = createMzExceptionOwned(err) orelse {\n                scheduleFutureRuntimeError(loop, future, \"mzproto error\");\n                return;\n            };\n            scheduleFutureExceptionObject(loop, future, exception);\n        },\n    }\n}\n\n");
@@ -508,6 +500,9 @@ fn emitAsyncClientOperation(writer: *std.Io.Writer, allocator: std.mem.Allocator
     }
     try writer.writeAll(") == 0) {\n        return null;\n    }\n\n");
     try writer.writeAll("    const client = nativeClientFromHandle(handle) orelse return null;\n");
+    if (!std.mem.eql(u8, fun.name, "terminate")) {
+        try writer.writeAll("    if (runtime_impl.Methods.Client.isTerminated(client.ptr)) {\n        setNativeError(\"mzproto client is shutting down\");\n        return null;\n    }\n");
+    }
     try writer.writeAll("    var loop: ?*python.PyObject = null;\n    const future = createAsyncioFutureOwned(&loop) orelse return null;\n");
     try writer.writeAll("    const handle_ref = pyNewRef(handle);\n    const future_ref = pyNewRef(future);\n");
     for (fun.params.items) |param| {

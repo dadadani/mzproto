@@ -136,13 +136,14 @@ pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io:
 
         if (!dc_addr_list.found_existing) {
             dc_addr_list.value_ptr.* = .empty;
-        } else {
-            if (dc_addr_list.value_ptr.items.len > 0) {
+        }
+
+        // check if already contains the same IP
+        for (dc_addr_list.value_ptr.items) |addr| {
+            if (addr.addr.tcp.eql(&try .parse(dc_option.ip_address, @intCast(dc_option.port)))) {
                 continue;
             }
         }
-
-        //dc_addr_list.value_ptr.clearRetainingCapacity();
 
         try dc_addr_list.value_ptr.append(allocator, .{ .addr = .{ .tcp = try .parse(dc_option.ip_address, @intCast(dc_option.port)) } });
 
@@ -228,8 +229,11 @@ pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: st
         break :blk .{ address, mode };
     };
 
-    for (addresses.items) |address| { 
-        const holder = connectAddress(address, mode, allocator, io) catch {
+    for (addresses.items) |address| {
+        const holder = connectAddress(address, mode, allocator, io) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return err;
+            }
             continue;
         };
 

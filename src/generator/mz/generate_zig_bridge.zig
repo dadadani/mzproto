@@ -215,7 +215,7 @@ fn emitSetters(writer: *std.Io.Writer, allocator: std.mem.Allocator, schema: *co
         defer allocator.free(input_ty);
         const assign_expr = try setterExprOwned(allocator, schema, "value", field.type_expr);
         defer allocator.free(assign_expr);
-        const field_expr = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ self_expr, snake });
+        const field_expr = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ self_expr, field.name });
         defer allocator.free(field_expr);
         try writer.print("{s}pub inline fn set{s}(self: @This(), allocator: std.mem.Allocator, value: {s}) !void {{\n", .{ indent, suffix, input_ty });
         try writer.print("{s}    deinitPublicOwnedValue(@TypeOf({s}), &{s}, allocator);\n", .{ indent, field_expr, field_expr });
@@ -338,6 +338,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\pub const BYTES_ARE_NO_COPY = true;
         \\pub const PREFERRED_STRING_ENCODING: PREFERRED_ENCODING = .utf8;
         \\pub const OBJECTS_ALWAYS_REFERENCED = false;
+        \\pub const LISTS_INIT_ARE_NO_COPY = true;
         \\
         \\pub const BridgeError = std.mem.Allocator.Error || error{PythonError};
         \\
@@ -602,7 +603,7 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\            return wrapBridgeValue(T, self.slice[index]);
         \\        }
         \\
-        \\        pub inline fn set(self: @This(), allocator: std.mem.Allocator, index: usize, value: T) void {
+        \\        pub inline fn set(self: @This(), allocator: std.mem.Allocator, index: usize, value: T) BridgeError!void {
         \\            deinitPublicOwnedValue(Storage, &self.slice[index], allocator);
         \\            self.slice[index] = unwrapBridgeValue(T, value);
         \\        }

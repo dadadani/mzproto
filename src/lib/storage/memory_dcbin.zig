@@ -43,7 +43,7 @@ fn write(self: *MemoryDcBinStorage, io: std.Io) Error!void {
 }
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, dst: []const u8) Error!MemoryDcBinStorage {
-    var file = std.Io.Dir.cwd().createFile(io, dst, .{ .lock = .exclusive, .truncate = false, .read = true }) catch {
+    var file = std.Io.Dir.cwd().createFile(io, dst, .{ .lock = .none, .truncate = false, .read = true }) catch {
         return Error.OpenError;
     };
     errdefer file.close(io);
@@ -119,7 +119,7 @@ pub fn getPreferredDC(self: *MemoryDcBinStorage, io: std.Io) !i32 {
     return self.preferred_dc;
 }
 
-pub fn setPreferredDC(self: *const MemoryDcBinStorage, io: std.Io, dc_id: i32) void {
+pub fn setPreferredDC(self: *MemoryDcBinStorage, io: std.Io, dc_id: i32) Error!void {
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
