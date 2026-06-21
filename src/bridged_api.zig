@@ -1,6 +1,7 @@
 const TestApi = @import("./lib/api/bridged/test.zig");
 const Updates = @import("./lib/api/bridged/updates.zig");
 const Authentication = @import("./lib/api/bridged/auth.zig");
+const Root = @import("root.zig");
 pub const Methods = .{
     .Client = .{
         .init = TestApi.init,
@@ -13,3 +14,7 @@ pub const Methods = .{
         .authenticateBot = Authentication.authenticateBot,
     },
 };
+
+test {
+    _ = Root;
+}

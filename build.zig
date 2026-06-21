@@ -275,6 +275,8 @@ pub fn build(b: *std.Build) void {
 
     bridge.addImport("mzproto_internal", internal_api);
 
+    const test_step = b.step("test", "Run tests");
+
     // now, depending on the language that we want to target, we need to change some things...
     switch (target_lang) {
         .python => {
@@ -318,8 +320,6 @@ pub fn build(b: *std.Build) void {
 
             bridge.addImport("mzproto", public_api);
 
-        
-
             const dev_exe = b.addExecutable(.{
                 .name = "dev",
                 .root_module = b.createModule(.{
@@ -332,9 +332,14 @@ pub fn build(b: *std.Build) void {
                 }),
             });
 
-
             const install_dev = b.addInstallArtifact(dev_exe, .{});
             b.default_step.dependOn(&install_dev.step);
+
+            const mod_tests = b.addTest(.{
+                .root_module = internal_api,
+            });
+            const run_mod_tests = b.addRunArtifact(mod_tests);
+            test_step.dependOn(&run_mod_tests.step);
         },
     }
 }

@@ -16,11 +16,16 @@ const Storage = @import("./lib/storage.zig");
 const TransportConnector = @import("./lib/transport_connector.zig");
 
 const public_api = @import("mzproto");
-pub const python_runtime = @import("./generator/mz/methods.zig");
 
 test {
+    _ = Client;
+    _ = Client.init;
+    _ = Client.backgroundInit;
     _ = tl_tests;
     _ = Storage;
+    _ = AuthKey;
+    _ = AuthKey.generate;
+    _ = @import("./lib/crypto/miller_rabin.zig");
+    _ = tl;
+    _ = @import("./lib/tl/api_tests.zig");
 }
-
-
