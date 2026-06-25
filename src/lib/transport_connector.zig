@@ -8,7 +8,26 @@ pub const DcAddressValue = union(enum) {
     tcp: std.Io.net.IpAddress,
 };
 
-pub const DcAddress = struct { addr: DcAddressValue, enable_obfuscation: bool = false, obfuscation_key: ?[16]u8 = null };
+pub const DcAddress = struct {
+    addr: DcAddressValue,
+    enable_obfuscation: bool = false,
+    obfuscation_key: ?[16]u8 = null,
+
+    pub fn eql(self: DcAddress, cmp: DcAddress) bool {
+        if (self.enable_obfuscation != cmp.enable_obfuscation) {
+            return false;
+        }
+
+        switch (self.addr) {
+            .tcp => |tcp| {
+                if (cmp.addr != .tcp) {
+                    return false;
+                }
+                return tcp.eql(&cmp.addr.tcp);
+            },
+        }
+    }
+};
 
 pub const TransportHolder = struct {
     transport: *Transport,
@@ -111,7 +130,7 @@ pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io:
     try self.lock.lock(io);
     defer self.lock.unlock(io);
 
-    for (config.dc_options) |idc_option| {
+    check: for (config.dc_options) |idc_option| {
         const dc_option = idc_option.DcOption;
 
         // TODO: add support for obfuscated connections
@@ -141,7 +160,7 @@ pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io:
         // check if already contains the same IP
         for (dc_addr_list.value_ptr.items) |addr| {
             if (addr.addr.tcp.eql(&try .parse(dc_option.ip_address, @intCast(dc_option.port)))) {
-                continue;
+                continue :check;
             }
         }
 
@@ -221,26 +240,53 @@ fn connectAddress(addr: DcAddress, mode: TransportMode, allocator: std.mem.Alloc
 }
 
 pub fn connectTo(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, dc_id: utils.DcId) !?TransportHolder {
-    try self.lock.lockShared(io);
-    defer self.lock.unlockShared(io);
-    const addresses, const mode = blk: {
-        const address = self.dc_address_map.get(dc_id) orelse return null;
-        const mode = self.mode;
-        break :blk .{ address, mode };
-    };
-
-    for (addresses.items) |address| {
-        const holder = connectAddress(address, mode, allocator, io) catch |err| {
-            if (err == std.Io.Cancelable.Canceled) {
-                return err;
-            }
-            continue;
+    const maybe_holder, const i, const maybe_addr = net: {
+        try self.lock.lockShared(io);
+        defer self.lock.unlockShared(io);
+        const addresses, const mode = blk: {
+            const address = self.dc_address_map.get(dc_id) orelse return null;
+            const mode = self.mode;
+            break :blk .{ address, mode };
         };
 
-        return holder;
+        for (addresses.items, 0..) |address, i| {
+            const holder = connectAddress(address, mode, allocator, io) catch |err| {
+                if (err == std.Io.Cancelable.Canceled) {
+                    break :net .{ err, 0, null };
+                }
+                continue;
+            };
+
+            break :net .{ holder, i, address };
+        }
+
+        break :net .{ std.Io.net.IpAddress.ConnectError.NetworkUnreachable, 0, null };
+    };
+
+    const holder = try maybe_holder;
+
+    if (i > 0) {
+        if (maybe_addr) |addr| {
+            self.lock.lock(io) catch {
+                return holder;
+            };
+            defer self.lock.unlock(io);
+
+            const list = self.dc_address_map.get(dc_id) orelse return holder;
+
+            for (list.items, 0..) |item, ix| {
+                if (item.eql(addr)) {
+                    const swap = list.items[0];
+                    list.items[0] = addr;
+                    list.items[ix] = swap;
+
+                    return holder;
+                }
+            }
+        }
     }
 
-    return std.Io.net.IpAddress.ConnectError.NetworkUnreachable;
+    return holder;
 }
 
 pub fn deinit(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io) void {

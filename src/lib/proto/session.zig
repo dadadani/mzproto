@@ -106,7 +106,6 @@ const Request = struct {
     message_id: ?u64 = null,
 };
 
-ping_timeout: std.Io.Timeout = .none,
 ping_disconnect: bool = false, // if this is set to true, the connection must be closed after the timeout is set
 ping_value: u32 = 0,
 
@@ -1113,6 +1112,8 @@ fn connectWithRetry(self: *Session, allocator: std.mem.Allocator, io: std.Io, re
         };
         return transport.?;
     }
+
+    log.debug("connectWithRetry end", .{});
 }
 
 fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
@@ -1416,7 +1417,9 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
         self.freeze_event.set(io);
         self.freeze_requests.store(false, .release);
         self.freeze_event.reset();
+        log.info("calling connectWithRetry", .{});
         const holder = try self.connectWithRetry(allocator, io, reason);
+
         reason = .none;
 
         var group: std.Io.Group = .init;
@@ -1441,6 +1444,7 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
         group.concurrent(io, Session.checkMessagesStatus, .{ self, allocator, io }) catch {
             @panic("concurrency unavailable");
         };
+
         group.concurrent(io, Session.pingWorker, .{ self, io, allocator }) catch {
             @panic("concurrency unavailable");
         };
@@ -1716,9 +1720,10 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
 }
 
 fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.Cancelable!void {
-    // For now, I am implementing a separate worker that periodically sends PingDelayDisconnect. TODO: consider integrating pingWorker into writerWorker by using `select`
     while (true) {
-        try self.ping_timeout.sleep(io);
+        const PING_TIMEOUT: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(PING_WRITE_INTERVAL_SECS), .clock = .boot } };
+
+        try PING_TIMEOUT.sleep(io);
 
         if (std.Io.Clock.now(.boot, io).addDuration(.fromSeconds(AuthKey.TEMP_KEYS_ADVANCE_S)).withClock(.boot).compare(.gt, self.auth_key.expiration.?)) {
             log.debug("temp auth key is about to expire, starting to generate a new one - {f}", .{self.dc});
@@ -1745,6 +1750,7 @@ fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.C
 
             if (self.ping_disconnect) {
                 log.debug("no pong received for more than {d} seconds, disconnecting - {f}", .{ PING_WRITE_INTERVAL_SECS * 2, self.dc });
+                self.ping_disconnect = false;
                 self.mutex.unlock(io);
                 self.requestReconnect(io, .reconnect_only);
                 return;
@@ -1766,8 +1772,6 @@ fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.C
             // TODO: what to do?
             return;
         };
-
-        self.ping_timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io, .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(PING_WRITE_INTERVAL_SECS), .clock = .boot }) };
 
         self.reqMessageState(allocator, io, false) catch {};
     }
@@ -2534,6 +2538,4 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
     var auth_key_id: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
-
-    self.ping_timeout = .{ .deadline = std.Io.Clock.Timestamp.now(io, .boot).addDuration(.{ .raw = std.Io.Duration.fromSeconds(PING_WRITE_INTERVAL_SECS), .clock = .boot }) };
 }

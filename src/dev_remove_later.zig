@@ -28,6 +28,15 @@ fn updatesLoop(allocator: std.mem.Allocator, client: *mzproto.Client) !void {
     while (unwrapResult(client.nextUpdate(true))) |update| {
         var update_var = update;
         defer update_var.deinit(allocator);
+
+        switch (update_var) {
+            .UpdateClientStatus => |cstat| {
+                if (cstat.status == .waiting_authorization) {
+                    std.log.debug("need to login\n", .{});
+                    unwrapResult(client.authenticateBot("dsads:sda"));
+                }
+            },
+        }
         std.log.info("{any}", .{update});
     }
 }
@@ -43,8 +52,8 @@ pub fn main(init: std.process.Init) !void {
     defer io.deinit();
 
     const config = mzproto.Config{
-        .api_hash = "test123",
-        .api_id = 3,
+        .api_hash = "a",
+        .api_id = 1,
         .app_version = "0.0.0",
         .device_model = "test",
         .storage_backend = .memory_dc_bin_storage,
