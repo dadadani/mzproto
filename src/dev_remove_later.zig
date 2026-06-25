@@ -1,5 +1,6 @@
 const std = @import("std");
 const mzproto = @import("mzproto");
+const info = @import("./dev.zon");
 
 fn unwrapTypeRes(comptime T: type) type {
     switch (@typeInfo(T)) {
@@ -33,7 +34,7 @@ fn updatesLoop(allocator: std.mem.Allocator, client: *mzproto.Client) !void {
             .UpdateClientStatus => |cstat| {
                 if (cstat.status == .waiting_authorization) {
                     std.log.debug("need to login\n", .{});
-                    unwrapResult(client.authenticateBot("dsads:sda"));
+                    unwrapResult(client.authenticateBot(info.bot_token));
                 }
             },
         }
@@ -52,8 +53,8 @@ pub fn main(init: std.process.Init) !void {
     defer io.deinit();
 
     const config = mzproto.Config{
-        .api_hash = "a",
-        .api_id = 1,
+        .api_hash = info.api_hash,
+        .api_id = info.api_id,
         .app_version = "0.0.0",
         .device_model = "test",
         .storage_backend = .memory_dc_bin_storage,

@@ -39,3 +39,4 @@ devenv.local.yaml
 
 zig-pkg
 __pycache__
+src/dev.zon
