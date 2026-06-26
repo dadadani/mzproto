@@ -66,7 +66,7 @@ pub inline fn determinePadding(len: usize) usize {
 }
 
 /// Derives the AES key and IV from the auth key, message key, and direction.
-fn kdf(auth_key: *const [256]u8, msg_key: []const u8, direction: Direction) struct { key: [32]u8, iv: [32]u8 } {
+fn kdf(auth_key: *const [256]u8, msg_key: []const u8, comptime direction: Direction) struct { key: [32]u8, iv: [32]u8 } {
     std.debug.assert(msg_key.len == 16);
 
     const x = direction.keyOffset();

@@ -30,6 +30,7 @@ test {
     _ = tl;
     _ = @import("./lib/tl/api_tests.zig");
     _ = @import("./lib/transport/dummy.zig");
-    _ = @import("./lib/crypto/mt1_crypto.zig");
-    _ = @import("./lib/crypto/mt2_crypto.zig");
+    _ = @import("./lib/proto/session_test_server.zig");
+    _ = @import("./lib/crypto/mt1.zig");
+    _ = @import("./lib/crypto/mt2.zig");
 }

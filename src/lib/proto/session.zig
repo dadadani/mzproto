@@ -1,5 +1,4 @@
 const tl = @import("tl");
-const makePadding = @import("tl_base").makePadding;
 const std = @import("std");
 const Transport = @import("../transport.zig").Transport;
 const MessageID = @import("./message_id.zig");
@@ -9,8 +8,8 @@ const TransportConnector = @import("../transport_connector.zig");
 const DcId = @import("../utils.zig").DcId;
 const AuthKey = @import("./auth_key.zig");
 const ClientManager = @import("../client_manager.zig");
-const MT2Crypto = @import("../crypto/mt2_crypto.zig");
-const MT1Crypto = @import("../crypto/mt1_crypto.zig");
+const MT2Crypto = @import("../crypto/mt2.zig");
+const MT1Crypto = @import("../crypto/mt1.zig");
 
 const QUEUE_SIZE = 20;
 const SALT_THRESHOLD = 15;
@@ -1156,19 +1155,8 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
         const fake = comptime tl.IProtoBindAuthKeyInner{ .ProtoBindAuthKeyInner = &tl.ProtoBindAuthKeyInner{ .expires_at = 0, .nonce = 0, .perm_auth_key_id = 0, .temp_auth_key_id = 0, .temp_session_id = 0 } };
         const message_size = comptime fake.serializeSize();
 
-        const offset_auth_key_id = 0;
-        const offset_msg_key = offset_auth_key_id + 8;
-        const offset_salt = offset_msg_key + 16;
-        const offset_session_id = offset_salt + 8;
-        const offset_message_id = offset_session_id + 8;
-        const offset_seqno = offset_message_id + 8;
-        const offset_len_data = offset_seqno + 4;
-        const offset_data = offset_len_data + 4;
-        const offset_padding = offset_data + message_size;
-        const offset_end = offset_padding + makePadding(16, offset_padding - offset_salt);
-
-        var encrypted_message: [offset_end]u8 = undefined;
-        _ = message_to_encrypt.serialize(encrypted_message[offset_data..offset_padding]);
+        var encrypted_message: [MT1Crypto.Layout.totalLen(message_size)]u8 = undefined;
+        _ = message_to_encrypt.serialize(encrypted_message[MT1Crypto.Layout.BODY..MT1Crypto.Layout.paddingOffset(message_size)]);
 
         var bind_salt: u64 = undefined;
         var bind_session_id: u64 = undefined;
@@ -2433,7 +2421,8 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
 }
 
-test "processBatch emits encrypted packet with expected outer layout" {
+test "processBatch emits decryptable client packet" {
+    const SessionTestServer = @import("./session_test_server.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2470,21 +2459,28 @@ test "processBatch emits encrypted packet with expected outer layout" {
     const holder, const dummy = try TransportConnector.dummyTransport(allocator);
     defer holder.deinit(io);
 
-    const body = try allocator.dupe(u8, &[_]u8{ 0x04, 0x03, 0x02, 0x01 });
+    var server = SessionTestServer.init(dummy, &session.auth_key_id, &session.auth_key.auth_key, session.session_id, session.auth_key.first_salt);
+
+    const body_bytes = [_]u8{ 0x04, 0x03, 0x02, 0x01 };
+    const body = try allocator.dupe(u8, &body_bytes);
+    const message_id = 0x0000000100000000;
     var batch = [_]Request{.{
         .id = null,
         .data = body,
         .content_related = false,
-        .message_id = 0x0000000100000000,
+        .message_id = message_id,
     }};
 
     try session.processBatch(allocator, io, holder.transport, &batch);
 
-    const packet = try dummy.serverRecv(io);
-    defer allocator.free(packet);
+    const packet = try server.recvClientPacket(io);
+    defer packet.deinit();
 
-    try std.testing.expectEqual(MT2Crypto.Layout.totalLen(body.len), packet.len);
-    try std.testing.expectEqualSlices(u8, &session.auth_key_id, packet[MT2Crypto.Layout.AUTH_KEY_ID..MT2Crypto.Layout.MSG_KEY]);
-    try std.testing.expect(!std.mem.allEqual(u8, packet[MT2Crypto.Layout.MSG_KEY..MT2Crypto.Layout.SALT], 0));
-    try std.testing.expectEqual(@as(usize, 16), packet[MT2Crypto.Layout.MSG_KEY..MT2Crypto.Layout.SALT].len);
+    try std.testing.expectEqual(MT2Crypto.Layout.totalLen(body_bytes.len), packet.bytes.len);
+    try std.testing.expectEqualSlices(u8, &session.auth_key_id, packet.bytes[MT2Crypto.Layout.AUTH_KEY_ID..MT2Crypto.Layout.MSG_KEY]);
+    try std.testing.expectEqual(session.auth_key.first_salt, packet.header.salt);
+    try std.testing.expectEqual(session.session_id, packet.header.session_id);
+    try std.testing.expectEqual(message_id, packet.header.message_id);
+    try std.testing.expectEqual(@as(u32, 0), packet.header.seqno);
+    try std.testing.expectEqualSlices(u8, &body_bytes, packet.body);
 }
