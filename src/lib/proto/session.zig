@@ -2484,3 +2484,95 @@ test "processBatch emits decryptable client packet" {
     try std.testing.expectEqual(@as(u32, 0), packet.header.seqno);
     try std.testing.expectEqualSlices(u8, &body_bytes, packet.body);
 }
+
+test "send resolves rpc_result through reader and writer workers" {
+    const SessionTestServer = @import("./session_test_server.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var perm_auth_key: [256]u8 = undefined;
+    var temp_auth_key: [256]u8 = undefined;
+    for (&perm_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 17 + 3) % 251);
+    }
+    for (&temp_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 31 + 11) % 251);
+    }
+
+    var client_manager: ClientManager = undefined;
+    var session: Session = undefined;
+    try session.init(io, &client_manager, &perm_auth_key, .{ .id = 2, .testmode = true }, 0);
+    defer session.deinit(io, allocator);
+
+    session.session_id = 0x1122334455667788;
+    session.auth_key = .{
+        .auth_key = temp_auth_key,
+        .first_salt = 0x8877665544332211,
+        .expiration = null,
+    };
+    var temp_auth_key_sha1: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(&temp_auth_key, &temp_auth_key_sha1, .{});
+    @memcpy(&session.auth_key_id, temp_auth_key_sha1[12..20]);
+
+    try session.salts.append(allocator, .{
+        .salt = session.auth_key.first_salt,
+        .valid_since = 0,
+        .valid_until = std.math.maxInt(i32),
+    });
+    session.connection_bound_auth_key = true;
+    session.init_ok = true;
+
+    const holder, const dummy = try TransportConnector.dummyTransport(allocator);
+    defer holder.deinit(io);
+
+    var server = SessionTestServer.init(dummy, &session.auth_key_id, &session.auth_key.auth_key, session.session_id, session.auth_key.first_salt);
+
+    const ScriptedServer = struct {
+        fn run(test_server: *SessionTestServer, test_session: *Session, test_allocator: std.mem.Allocator, test_io: std.Io, expected_ping_id: u64) std.Io.Cancelable!void {
+            const packet = test_server.recvClientPacket(test_io) catch unreachable;
+            defer packet.deinit();
+
+            std.testing.expectEqual(test_session.session_id, packet.header.session_id) catch unreachable;
+            std.testing.expectEqual(test_session.auth_key.first_salt, packet.header.salt) catch unreachable;
+            std.testing.expectEqual(tl.TL.Enum.ProtoPing, tl.TL.identify(std.mem.readInt(u32, packet.body[0..4], .little)).?) catch unreachable;
+
+            var ping_buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
+            const ping, _, _ = tl.ProtoPing.deserialize(packet.body[4..], &ping_buf);
+            std.testing.expectEqual(expected_ping_id, ping.ping_id) catch unreachable;
+
+            const response_msg_id = (test_session.message_id.get(test_io) & ~@as(u64, 3)) | 1;
+            test_server.sendRpcResult(
+                test_allocator,
+                test_io,
+                response_msg_id,
+                packet.header.message_id,
+                tl.TL{ .ProtoPong = &.{ .msg_id = packet.header.message_id, .ping_id = ping.ping_id } },
+            ) catch unreachable;
+        }
+    };
+
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+
+    try group.concurrent(io, Session.writerWorker, .{ &session, io, allocator, holder.transport });
+    try group.concurrent(io, Session.readerWorker, .{ &session, io, allocator, holder.transport });
+
+    const ping_id = 0x1122334455667788;
+    try group.concurrent(io, ScriptedServer.run, .{ &server, &session, allocator, io, ping_id });
+
+    const response = try session.send(io, allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false);
+    defer response.deinit(allocator);
+
+    switch (response.data) {
+        .ProtoPong => |pong| {
+            try std.testing.expectEqual(ping_id, pong.ping_id);
+        },
+        else => return error.UnexpectedResponse,
+    }
+
+    try session.mutex.lock(io);
+    defer session.mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_answers.map.count());
+    try std.testing.expectEqual(@as(usize, 0), session.pending_answers_idmap.count());
+    try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
+}

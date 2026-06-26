@@ -1,4 +1,5 @@
 const std = @import("std");
+const tl = @import("tl");
 const Transport = @import("../transport.zig").Transport;
 const MT2Crypto = @import("../crypto/mt2.zig");
 
@@ -11,6 +12,8 @@ session_id: u64,
 salt: u64,
 next_message_id: u64 = 0x0000000100000001,
 next_seqno: u32 = 0,
+
+pub const RPC_RESULT_CONSTRUCTOR = 0xf35c6d01;
 
 pub const ClientPacket = struct {
     allocator: std.mem.Allocator,
@@ -48,10 +51,7 @@ pub fn recvClientPacket(self: *SessionTestServer, io: std.Io) !ClientPacket {
     };
 }
 
-pub fn sendServerBody(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, body: []const u8) !void {
-    const message_id = self.next_message_id;
-    self.next_message_id +%= 4;
-
+pub fn sendServerBodyWithMessageId(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, body: []const u8) !void {
     var bytes = try allocator.alloc(u8, MT2Crypto.Layout.totalLen(body.len));
     defer allocator.free(bytes);
 
@@ -70,6 +70,25 @@ pub fn sendServerBody(self: *SessionTestServer, allocator: std.mem.Allocator, io
     );
 
     try self.dummy.serverWrite(io, bytes);
+}
+
+pub fn sendServerBody(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, body: []const u8) !void {
+    const message_id = self.next_message_id;
+    self.next_message_id +%= 4;
+
+    try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
+}
+
+pub fn sendRpcResult(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, req_msg_id: u64, result: tl.TL) !void {
+    const result_size = result.serializeSize();
+    var body = try allocator.alloc(u8, 12 + result_size);
+    defer allocator.free(body);
+
+    std.mem.writeInt(u32, body[0..4], RPC_RESULT_CONSTRUCTOR, .little);
+    std.mem.writeInt(u64, body[4..12], req_msg_id, .little);
+    _ = result.serialize(body[12..]);
+
+    try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
 }
 
 test "receives client packet and sends server packet" {
