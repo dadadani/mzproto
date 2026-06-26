@@ -1404,6 +1404,97 @@ fn checkMessagesStatus(self: *Session, allocator: std.mem.Allocator, io: std.Io)
     }
 }
 
+fn sessionSupervisorRun(self: *Session, allocator: std.mem.Allocator, io: std.Io, reason: *ReconnectReason, holder: TransportConnector.TransportHolder) std.Io.Cancelable!void {
+    reason.* = .none;
+
+    var group: std.Io.Group = .init;
+
+    group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
+        @panic("concurrency unavailable");
+    };
+
+    if (!self.connection_bound_auth_key) {
+        self.auth_key_bound_event.reset();
+        group.concurrent(io, Session.prebindWriterWorker, .{ self, io, allocator, holder.transport }) catch {
+            @panic("concurrency unavailable");
+        };
+        group.concurrent(io, Session.initConnection, .{ self, allocator, io }) catch {
+            @panic("concurrency unavailable");
+        };
+    } else {
+        group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
+            @panic("concurrency unavailable");
+        };
+    }
+    group.concurrent(io, Session.checkMessagesStatus, .{ self, allocator, io }) catch {
+        @panic("concurrency unavailable");
+    };
+
+    group.concurrent(io, Session.pingWorker, .{ self, io, allocator }) catch {
+        @panic("concurrency unavailable");
+    };
+
+    self.conn_restart.wait(io) catch {
+        group.cancel(io);
+        return;
+    };
+
+    group.cancel(io);
+
+    reason.* = self.reconnect_reason;
+    self.reconnect_reason = .none;
+    self.conn_restart.reset();
+
+    const shutdown = self.shutdown.load(.acquire);
+    if ((shutdown or self.wait_and_recreate_auth_key) and reason.* != .refresh_temp_key) {
+
+        // when a new auth key is generated, the session is usually cleared.
+        // to make the switch seamless, we process the remaining pending requests, and only then we switch to the new auth key
+        var auth_key: ?AuthKey.GeneratedAuthKey = null;
+
+        group = .init;
+
+        group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
+            @panic("concurrency unavailable");
+        };
+        group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
+            @panic("concurrency unavailable");
+        };
+        group.concurrent(io, Session.prepareNewTempAuthKey, .{ self, allocator, io, &auth_key, shutdown }) catch {
+            @panic("concurrency unavailable");
+        };
+
+        self.conn_restart.wait(io) catch |err| {
+            group.cancel(io);
+            return err;
+        };
+
+        const sub_reason = reason: {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            break :reason self.reconnect_reason;
+        };
+
+        group.cancel(io);
+        self.conn_restart.reset();
+        self.reconnect_reason = .none;
+
+        self.wait_and_recreate_auth_key = false;
+
+        if (!shutdown and sub_reason == .none) {
+            if (auth_key) |gen_key| {
+                self.setTempKey(allocator, io, gen_key) catch |err| {
+                    if (err == std.Io.Cancelable.Canceled) {
+                        return std.Io.Cancelable.Canceled;
+                    }
+                    return;
+                };
+                self.reconnect_reason = .none;
+            }
+        }
+    }
+}
+
 pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
     var reason: ReconnectReason = self.reconnect_reason;
     self.reconnect_reason = .none;
@@ -1418,102 +1509,11 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
         self.freeze_requests.store(false, .release);
         self.freeze_event.reset();
         log.info("calling connectWithRetry", .{});
-        const holder = try self.connectWithRetry(allocator, io, reason);
-
-        reason = .none;
-
-        var group: std.Io.Group = .init;
-
-        group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
-            @panic("concurrency unavailable");
-        };
-
-        if (!self.connection_bound_auth_key) {
-            self.auth_key_bound_event.reset();
-            group.concurrent(io, Session.prebindWriterWorker, .{ self, io, allocator, holder.transport }) catch {
-                @panic("concurrency unavailable");
-            };
-            group.concurrent(io, Session.initConnection, .{ self, allocator, io }) catch {
-                @panic("concurrency unavailable");
-            };
-        } else {
-            group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
-                @panic("concurrency unavailable");
-            };
+        {
+            const holder = try self.connectWithRetry(allocator, io, reason);
+            defer holder.deinit(io);
+            try self.sessionSupervisorRun(allocator, io, &reason, holder);
         }
-        group.concurrent(io, Session.checkMessagesStatus, .{ self, allocator, io }) catch {
-            @panic("concurrency unavailable");
-        };
-
-        group.concurrent(io, Session.pingWorker, .{ self, io, allocator }) catch {
-            @panic("concurrency unavailable");
-        };
-
-        self.conn_restart.wait(io) catch {
-            group.cancel(io);
-            holder.deinit(io);
-            return;
-        };
-
-        group.cancel(io);
-
-        reason = self.reconnect_reason;
-        self.reconnect_reason = .none;
-        self.conn_restart.reset();
-
-        const shutdown = self.shutdown.load(.acquire);
-        if ((shutdown or self.wait_and_recreate_auth_key) and reason != .refresh_temp_key) {
-
-            // when a new auth key is generated, the session is usually cleared.
-            // to make the switch seamless, we process the remaining pending requests, and only then we switch to the new auth key
-            var auth_key: ?AuthKey.GeneratedAuthKey = null;
-
-            group = .init;
-
-            group.concurrent(io, Session.readerWorker, .{ self, io, allocator, holder.transport }) catch {
-                @panic("concurrency unavailable");
-            };
-            group.concurrent(io, Session.writerWorker, .{ self, io, allocator, holder.transport }) catch {
-                @panic("concurrency unavailable");
-            };
-            group.concurrent(io, Session.prepareNewTempAuthKey, .{ self, allocator, io, &auth_key, shutdown }) catch {
-                @panic("concurrency unavailable");
-            };
-
-            self.conn_restart.wait(io) catch {
-                group.cancel(io);
-                holder.deinit(io);
-                return;
-            };
-
-            const sub_reason = reason: {
-                self.mutex.lockUncancelable(io);
-                defer self.mutex.unlock(io);
-                break :reason self.reconnect_reason;
-            };
-
-            group.cancel(io);
-            self.conn_restart.reset();
-            self.reconnect_reason = .none;
-
-            if (!shutdown and sub_reason == .none) {
-                if (auth_key) |gen_key| {
-                    self.setTempKey(allocator, io, gen_key) catch |err| {
-                        if (err == std.Io.Cancelable.Canceled) {
-                            return std.Io.Cancelable.Canceled;
-                        }
-                        holder.deinit(io);
-                        self.wait_and_recreate_auth_key = false;
-                        continue;
-                    };
-                    self.reconnect_reason = .none;
-                } else {}
-            }
-        }
-
-        holder.deinit(io);
-
-        self.wait_and_recreate_auth_key = false;
     }
 }
 
