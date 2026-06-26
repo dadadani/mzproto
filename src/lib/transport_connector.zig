@@ -227,7 +227,7 @@ fn connectAddress(addr: DcAddress, mode: TransportMode, allocator: std.mem.Alloc
                 switch (mode) {
                     .Abridged => {
                         const transport = try arena.allocator().create(Transport);
-                        transport.* = .{ .transport = .{ .Streamridged = try Transport.StreamAbridged.init(io, stream, readBuf, writeBuf) } };
+                        transport.* = .{ .transport = .{ .StreamAbridged = try Transport.StreamAbridged.init(io, stream, readBuf, writeBuf) } };
                         break :blk transport;
                     },
                 }
@@ -299,4 +299,21 @@ pub fn deinit(self: *TransportConnector, allocator: std.mem.Allocator, io: std.I
     }
 
     self.dc_address_map.deinit(allocator);
+}
+
+pub fn dummyTransport(allocator: std.mem.Allocator) !struct { TransportHolder, *Transport.Dummy } {
+    if (!@import("builtin").is_test) {
+        @compileError("must be in a test");
+    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    const server_buf = try arena.allocator().alloc([]u8, 20);
+    const client_buf = try arena.allocator().alloc([]u8, 20);
+
+    const transport = try arena.allocator().create(Transport);
+
+    transport.* = .{ .transport = .{ .Dummy = try Transport.Dummy.init(allocator, client_buf, server_buf) } };
+
+    return .{ .{ .arena = arena, .transport = transport }, &transport.transport.Dummy };
 }

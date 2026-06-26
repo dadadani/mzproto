@@ -28,4 +28,5 @@ test {
     _ = @import("./lib/crypto/miller_rabin.zig");
     _ = tl;
     _ = @import("./lib/tl/api_tests.zig");
+    _ = @import("./lib/transport/dummy.zig");
 }

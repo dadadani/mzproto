@@ -3,11 +3,14 @@ const std = @import("std");
 pub const Transports = std.meta.Tag(TransportUnion);
 
 const TransportUnion = union(enum) {
-    Streamridged: Transport.StreamAbridged,
+    StreamAbridged: Transport.StreamAbridged,
+    Dummy: if (@import("builtin").is_test) Transport.Dummy else struct {},
 };
 
 pub const Transport = struct {
     pub const StreamAbridged = @import("transport/stream_abridged.zig");
+
+    pub const Dummy = @import("transport/dummy.zig");
 
     pub const Error = error{ LengthNotRead, LengthAlreadyConsumed } || std.Io.Writer.Error || std.Io.Reader.Error || std.Io.Cancelable;
 
@@ -33,7 +36,7 @@ pub const Transport = struct {
         };
     }
 
-    pub fn writeVec(self: *Transport, io: std.Io, buf: [][]const u8) Error!void {
+    pub fn writeVec(self: *Transport, io: std.Io, buf: []const []const u8) Error!void {
         return switch (self.transport) {
             inline else => |*x| x.writeVec(io, buf),
         };
