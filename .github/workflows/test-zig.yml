@@ -22,3 +22,14 @@ jobs:
     - name: build
       shell: 'nix develop -c bash -e {0}'
       run: zig build
+    - name: Overwrite file
+      uses: "DamianReeves/write-file-action@master"
+      with:
+          path: src/dev.zon
+          write-mode: overwrite
+          contents: |
+            .{
+                .api_id = 1,
+                .api_hash = "1",
+                .bot_token = "a:b",
+            }
