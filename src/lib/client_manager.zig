@@ -117,10 +117,8 @@ pub fn pushClientStatus(self: *ClientManager, allocator: std.mem.Allocator, io: 
 pub fn importConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
     try self.transport_connector.importConfig(allocator, io, config);
     {
-        std.debug.print("locking importConfig...\n", .{});
         try self.internal.lock.lock(io);
         defer {
-            std.log.debug("unlocking importConfig...", .{});
             self.internal.lock.unlock(io);
         }
         if (self.internal.target_dc) |switch_to_dc| {

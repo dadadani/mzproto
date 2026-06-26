@@ -13,7 +13,8 @@ salt: u64,
 next_message_id: u64 = 0x0000000100000001,
 next_seqno: u32 = 0,
 
-pub const RPC_RESULT_CONSTRUCTOR = 0xf35c6d01;
+pub const RPC_RESULT_CID = 0xf35c6d01;
+pub const MESSAGE_CONTAINER_CID = 0x73f1f8dc;
 
 pub const ClientPacket = struct {
     allocator: std.mem.Allocator,
@@ -24,6 +25,19 @@ pub const ClientPacket = struct {
     pub fn deinit(self: ClientPacket) void {
         self.allocator.free(self.bytes);
     }
+};
+
+pub const ServerMessage = struct {
+    msg_id: u64,
+    seqno: u32 = 0,
+    body: []const u8,
+};
+
+pub const RpcResult = struct {
+    msg_id: u64,
+    seqno: u32 = 0,
+    req_msg_id: u64,
+    result: tl.TL,
 };
 
 pub fn init(dummy: *Transport.Dummy, auth_key_id: *const [8]u8, auth_key: *const [256]u8, session_id: u64, salt: u64) SessionTestServer {
@@ -84,11 +98,71 @@ pub fn sendRpcResult(self: *SessionTestServer, allocator: std.mem.Allocator, io:
     var body = try allocator.alloc(u8, 12 + result_size);
     defer allocator.free(body);
 
-    std.mem.writeInt(u32, body[0..4], RPC_RESULT_CONSTRUCTOR, .little);
+    std.mem.writeInt(u32, body[0..4], RPC_RESULT_CID, .little);
     std.mem.writeInt(u64, body[4..12], req_msg_id, .little);
     _ = result.serialize(body[12..]);
 
     try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
+}
+
+pub fn sendServerContainer(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, messages: []const ServerMessage) !void {
+    var body_len: usize = 8;
+    for (messages) |message| {
+        body_len += 8 + 4 + 4 + message.body.len;
+    }
+
+    var body = try allocator.alloc(u8, body_len);
+    defer allocator.free(body);
+
+    std.mem.writeInt(u32, body[0..4], MESSAGE_CONTAINER_CID, .little);
+    std.mem.writeInt(u32, body[4..8], @intCast(messages.len), .little);
+
+    var cursor: usize = 8;
+    for (messages) |message| {
+        std.mem.writeInt(u64, body[cursor..][0..8], message.msg_id, .little);
+        cursor += 8;
+        std.mem.writeInt(u32, body[cursor..][0..4], message.seqno, .little);
+        cursor += 4;
+        std.mem.writeInt(u32, body[cursor..][0..4], @intCast(message.body.len), .little);
+        cursor += 4;
+        @memcpy(body[cursor..][0..message.body.len], message.body);
+        cursor += message.body.len;
+    }
+
+    try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
+}
+
+pub fn sendRpcResultContainer(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, responses: []const RpcResult) !void {
+    var bodies = try allocator.alloc([]u8, responses.len);
+    var bodies_len: usize = 0;
+    defer {
+        for (bodies[0..bodies_len]) |body| {
+            allocator.free(body);
+        }
+        allocator.free(bodies);
+    }
+
+    var messages = try allocator.alloc(ServerMessage, responses.len);
+    defer allocator.free(messages);
+
+    for (responses, 0..) |response, i| {
+        const result_size = response.result.serializeSize();
+        const body = try allocator.alloc(u8, 12 + result_size);
+        bodies[bodies_len] = body;
+        bodies_len += 1;
+
+        std.mem.writeInt(u32, body[0..4], RPC_RESULT_CID, .little);
+        std.mem.writeInt(u64, body[4..12], response.req_msg_id, .little);
+        _ = response.result.serialize(body[12..]);
+
+        messages[i] = .{
+            .msg_id = response.msg_id,
+            .seqno = response.seqno,
+            .body = body,
+        };
+    }
+
+    try self.sendServerContainer(allocator, io, message_id, messages);
 }
 
 test "receives client packet and sends server packet" {

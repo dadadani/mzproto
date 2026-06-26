@@ -2576,3 +2576,231 @@ test "send resolves rpc_result through reader and writer workers" {
     try std.testing.expectEqual(@as(usize, 0), session.pending_answers_idmap.count());
     try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
 }
+
+test "concurrent rpc queries" {
+    const SessionTestServer = @import("./session_test_server.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const request_count = 3;
+
+    var perm_auth_key: [256]u8 = undefined;
+    var temp_auth_key: [256]u8 = undefined;
+    for (&perm_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 17 + 3) % 251);
+    }
+    for (&temp_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 31 + 11) % 251);
+    }
+
+    var client_manager: ClientManager = undefined;
+    var session: Session = undefined;
+    try session.init(io, &client_manager, &perm_auth_key, .{ .id = 2, .testmode = true }, 0);
+    defer session.deinit(io, allocator);
+
+    session.session_id = 0x1122334455667788;
+    session.auth_key = .{
+        .auth_key = temp_auth_key,
+        .first_salt = 0x8877665544332211,
+        .expiration = null,
+    };
+    var temp_auth_key_sha1: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(&temp_auth_key, &temp_auth_key_sha1, .{});
+    @memcpy(&session.auth_key_id, temp_auth_key_sha1[12..20]);
+
+    try session.salts.append(allocator, .{
+        .salt = session.auth_key.first_salt,
+        .valid_since = 0,
+        .valid_until = std.math.maxInt(i32),
+    });
+    session.connection_bound_auth_key = true;
+    session.init_ok = true;
+
+    const holder, const dummy = try TransportConnector.dummyTransport(allocator);
+    defer holder.deinit(io);
+
+    var server = SessionTestServer.init(dummy, &session.auth_key_id, &session.auth_key.auth_key, session.session_id, session.auth_key.first_salt);
+
+    const ClientRequest = struct {
+        msg_id: u64,
+        ping_id: u64,
+    };
+
+    const ScriptedServer = struct {
+        fn appendPing(out: *[request_count]ClientRequest, out_len: *usize, msg_id: u64, body: []const u8) void {
+            std.testing.expect(out_len.* < out.len) catch unreachable;
+            std.testing.expectEqual(tl.TL.Enum.ProtoPing, tl.TL.identify(std.mem.readInt(u32, body[0..4], .little)).?) catch unreachable;
+
+            var ping_buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
+            const ping, _, _ = tl.ProtoPing.deserialize(body[4..], &ping_buf);
+
+            out[out_len.*] = .{
+                .msg_id = msg_id,
+                .ping_id = ping.ping_id,
+            };
+            out_len.* += 1;
+        }
+
+        fn appendPacketRequests(out: *[request_count]ClientRequest, out_len: *usize, packet: SessionTestServer.ClientPacket) void {
+            const constructor = std.mem.readInt(u32, packet.body[0..4], .little);
+            if (constructor != SessionTestServer.MESSAGE_CONTAINER_CID) {
+                appendPing(out, out_len, packet.header.message_id, packet.body);
+                return;
+            }
+
+            const count = std.mem.readInt(u32, packet.body[4..8], .little);
+            var cursor: usize = 8;
+            for (0..count) |_| {
+                std.testing.expect(cursor + 16 <= packet.body.len) catch unreachable;
+
+                const msg_id = std.mem.readInt(u64, packet.body[cursor..][0..8], .little);
+                cursor += 8;
+                cursor += 4;
+                const body_len = std.mem.readInt(u32, packet.body[cursor..][0..4], .little);
+                cursor += 4;
+
+                std.testing.expect(cursor + body_len <= packet.body.len) catch unreachable;
+                appendPing(out, out_len, msg_id, packet.body[cursor..][0..body_len]);
+                cursor += body_len;
+            }
+            std.testing.expectEqual(packet.body.len, cursor) catch unreachable;
+        }
+
+        fn run(test_server: *SessionTestServer, test_session: *Session, test_allocator: std.mem.Allocator, test_io: std.Io, expected_ping_ids: *const [request_count]u64) std.Io.Cancelable!void {
+            var requests: [request_count]ClientRequest = undefined;
+            var requests_len: usize = 0;
+
+            while (requests_len < request_count) {
+                const packet = test_server.recvClientPacket(test_io) catch unreachable;
+                defer packet.deinit();
+
+                std.testing.expectEqual(test_session.session_id, packet.header.session_id) catch unreachable;
+                std.testing.expectEqual(test_session.auth_key.first_salt, packet.header.salt) catch unreachable;
+
+                appendPacketRequests(&requests, &requests_len, packet);
+            }
+
+            for (expected_ping_ids) |expected_ping_id| {
+                var found = false;
+                for (requests) |request| {
+                    if (request.ping_id == expected_ping_id) {
+                        found = true;
+                        break;
+                    }
+                }
+                std.testing.expect(found) catch unreachable;
+            }
+
+            const first_msg_id = (test_session.message_id.get(test_io) & ~@as(u64, 3)) | 1;
+            var pongs: [request_count]tl.ProtoPong = undefined;
+            var responses: [request_count]SessionTestServer.RpcResult = undefined;
+
+            for (0..request_count) |i| {
+                const request_index = request_count - 1 - i;
+                pongs[i] = .{
+                    .msg_id = requests[request_index].msg_id,
+                    .ping_id = requests[request_index].ping_id,
+                };
+                responses[i] = .{
+                    .msg_id = first_msg_id + @as(u64, @intCast(i)) * 4,
+                    .req_msg_id = requests[request_index].msg_id,
+                    .result = tl.TL{ .ProtoPong = &pongs[i] },
+                };
+            }
+
+            const container_msg_id = first_msg_id + @as(u64, @intCast(request_count)) * 4;
+            test_server.sendRpcResultContainer(test_allocator, test_io, container_msg_id, &responses) catch unreachable;
+        }
+    };
+
+    const SendWorker = struct {
+        fn run(test_session: *Session, test_allocator: std.mem.Allocator, test_io: std.Io, ping_id: u64, remaining: *std.atomic.Value(u32), all_done: *std.Io.Event, result: *u64) std.Io.Cancelable!void {
+            defer if (remaining.fetchSub(1, .seq_cst) == 1) all_done.set(test_io);
+
+            const response = test_session.send(test_io, test_allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false) catch unreachable;
+            defer response.deinit(test_allocator);
+
+            switch (response.data) {
+                .ProtoPong => |pong| {
+                    std.testing.expectEqual(ping_id, pong.ping_id) catch unreachable;
+                    result.* = pong.ping_id;
+                },
+                else => unreachable,
+            }
+        }
+    };
+
+    const CompletionWait = struct {
+        fn wait(event: *std.Io.Event, test_io: std.Io) !void {
+            const Result = union(enum) {
+                completed: std.Io.Cancelable!void,
+                timeout: std.Io.Cancelable!void,
+            };
+            const Select = std.Io.Select(Result);
+            const completion_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .boot } };
+
+            var buffer: [2]Result = undefined;
+            var select = Select.init(test_io, &buffer);
+            try select.concurrent(.completed, std.Io.Event.wait, .{ event, test_io });
+            try select.concurrent(.timeout, std.Io.Timeout.sleep, .{ completion_timeout, test_io });
+
+            const result = try select.await();
+            _ = select.cancel();
+
+            switch (result) {
+                .completed => |completed| try completed,
+                .timeout => |timed_out| {
+                    try timed_out;
+                    return error.Timeout;
+                },
+            }
+        }
+    };
+
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+
+    const ping_ids = [request_count]u64{
+        0x1011121314151617,
+        0x2021222324252627,
+        0x3031323334353637,
+    };
+    var remaining: std.atomic.Value(u32) = .init(request_count);
+    var all_done: std.Io.Event = .unset;
+    var results: [request_count]u64 = @splat(0);
+
+    for (ping_ids, 0..) |ping_id, i| {
+        try group.concurrent(io, SendWorker.run, .{ &session, allocator, io, ping_id, &remaining, &all_done, &results[i] });
+    }
+
+    const poll_interval: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .boot } };
+    var queued = false;
+    for (0..1000) |_| {
+        try session.mutex.lock(io);
+        const pending_count = session.pending_answers.map.count();
+        session.mutex.unlock(io);
+
+        if (pending_count == request_count) {
+            queued = true;
+            break;
+        }
+
+        try poll_interval.sleep(io);
+    }
+    try std.testing.expect(queued);
+    try poll_interval.sleep(io);
+
+    try group.concurrent(io, Session.writerWorker, .{ &session, io, allocator, holder.transport });
+    try group.concurrent(io, Session.readerWorker, .{ &session, io, allocator, holder.transport });
+    try group.concurrent(io, ScriptedServer.run, .{ &server, &session, allocator, io, &ping_ids });
+
+    try CompletionWait.wait(&all_done, io);
+
+    try std.testing.expectEqualSlices(u64, &ping_ids, &results);
+
+    try session.mutex.lock(io);
+    defer session.mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_answers.map.count());
+    try std.testing.expectEqual(@as(usize, 0), session.pending_answers_idmap.count());
+    try std.testing.expectEqual(@as(usize, 0), session.pending_containers.count());
+    try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
+}
