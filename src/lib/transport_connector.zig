@@ -79,22 +79,22 @@ pub fn init(allocator: std.mem.Allocator, protocol: std.meta.Tag(DcAddressValue)
         var dc_prod: std.ArrayList(DcAddress) = try .initCapacity(allocator, 2);
         errdefer dc_prod.deinit(allocator);
 
-        if (enable_ipv4) {
+        if (enable_ipv6) {
             dc_prod.appendAssumeCapacity(DEFAULT_TCP_PROD_SERVER[1][0]);
         }
 
-        if (enable_ipv6) {
+        if (enable_ipv4) {
             dc_prod.appendAssumeCapacity(DEFAULT_TCP_PROD_SERVER[1][1]);
         }
 
         var dc_test: std.ArrayList(DcAddress) = try .initCapacity(allocator, 2);
         errdefer dc_test.deinit(allocator);
 
-        if (enable_ipv4) {
+        if (enable_ipv6) {
             dc_test.appendAssumeCapacity(DEFAULT_TCP_TEST_SERVER[1][0]);
         }
 
-        if (enable_ipv6) {
+        if (enable_ipv4) {
             dc_test.appendAssumeCapacity(DEFAULT_TCP_TEST_SERVER[1][1]);
         }
 
