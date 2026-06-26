@@ -60,7 +60,6 @@ pub fn boilerplate(io: std.Io, filename: []const u8, writer: *std.Io.Writer) !vo
             \\pub const ProtoMessageContainer = base.ProtoMessageContainer;
             \\pub const ProtoMessage = base.ProtoMessage;
             \\pub const ProtoRPCResult = base.ProtoRPCResult();
-            \\pub const Vector = base.Vector(TL);
             \\pub const ProtoFutureSalts = base.ProtoFutureSalts(TL, ProtoFutureSalt);
             \\pub const ProtoRpcError = base.ProtoRpcError;
             \\const IProtoFutureSalts = base.IProtoFutureSalts(TL, ProtoFutureSalt);

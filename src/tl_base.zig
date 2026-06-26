@@ -318,123 +318,6 @@ pub const ProtoRpcError = struct {
     }
 };
 
-// This type is required by some functions calls that might return a vector
-pub fn Vector(comptime ty: type) type {
-    return struct {
-        elements: []const ty,
-
-        // We don't do serialization with this type
-
-        pub fn serializeSize(self: *const @This()) usize {
-            _ = self;
-            unreachable;
-        }
-
-        pub fn serialize(self: *const @This(), dest: []u8) usize {
-            _ = self;
-            _ = dest;
-            unreachable;
-        }
-
-        pub fn cloneSize(self: *const @This(), size: *usize) void {
-            size.* += @sizeOf(@This());
-            size.* += ensureAligned(size.*, @alignOf([]const ty));
-            size.* += self.elements.len * @sizeOf(ty);
-            for (self.elements) |element| {
-                element.cloneSize(size);
-            }
-        }
-
-        pub fn clone(self: *const @This(), out: []align(@alignOf(@This())) u8) struct { *@This(), usize } {
-            const self_out = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-            var written: usize = 0;
-
-            written += @sizeOf(@This());
-
-            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf([]const ty));
-            //result.elements = @as([]const ty, @alignCast(dest[size.* .. size.* + (@sizeOf(ty) * self.elements.len)]));
-            self_out.elements = @as([]const ty, @alignCast(std.mem.bytesAsSlice(ty, out[written .. written + (@sizeOf(ty) * self.elements.len)])));
-            written += @sizeOf(ty) * self.elements.len;
-
-            const elements = @constCast(self_out.elements);
-
-            for (0..self.elements.len) |i| {
-                const cloned = self.elements[i].clone(out[written..]);
-                elements[i] = cloned[0];
-                written += cloned[1];
-            }
-
-            return .{ self_out, written };
-        }
-
-        pub fn deserializeSize(in: []const u8, size: *usize) usize {
-            size.* += @sizeOf(@This());
-            var read: usize = 0;
-
-            const len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-            read += 4;
-
-            size.* += ensureAligned(size.*, @alignOf([]const ty));
-            size.* += len * @sizeOf(ty);
-
-            if (len > 0) {
-                const el = in[read..].len / len;
-
-                if (el != 4 and el != 8) {
-                    for (0..len) |_| {
-                        read += ty.deserializeSize(in[read..], size);
-                    }
-                } else {
-                    read += in[read..].len;
-                }
-            }
-
-            return read;
-        }
-
-        pub fn deserialize(in: []const u8, out: []align(@alignOf(@This())) u8) struct { *@This(), usize, usize } {
-            const self = @as(*@This(), @ptrCast(@alignCast(out[0..].ptr)));
-            var written: usize = @sizeOf(@This());
-            var read: usize = 0;
-
-            const len = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
-            read += 4;
-
-            written += ensureAligned(@intFromPtr(out[written..].ptr), @alignOf(@TypeOf(self.elements)));
-            const vector = @constCast(@as(@TypeOf(self.elements), @alignCast(std.mem.bytesAsSlice(unwrapType(@TypeOf(self.elements)), out[written .. written + (len * @sizeOf(unwrapType(@TypeOf(self.elements))))]))));
-            written += @sizeOf(unwrapType(@TypeOf(self.elements))) * len;
-
-            if (len > 0) {
-                const el = in[read..].len / len;
-
-                // TODO: Although this works, we should change the TL parser to actually provide a "result decoder", we have the expected type in the schema already
-                if (el == 4) {
-                    for (0..len) |i| {
-                        vector[i] = ty{ .Int = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little) };
-                        read += 4;
-                    }
-                } else if (el == 8) {
-                    for (0..len) |i| {
-                        vector[i] = ty{ .Long = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little) };
-                        read += 8;
-                    }
-                } else {
-                    for (0..len) |i| {
-                        const d = ty.deserialize(in[written..], out[read..]);
-                        vector[i] = d[0];
-                        written += d[1];
-                        read += d[2];
-                    }
-                }
-            }
-
-            self.elements = vector;
-
-            return .{ self, written, read };
-        }
-    };
-}
-
 pub inline fn makePadding(n: anytype, topad: anytype) usize {
     const remainder = topad % n;
     return if (remainder == 0) 0 else n - remainder;
@@ -620,8 +503,6 @@ pub fn bytesToSlice(in: []u8, size: usize, comptime T: type) struct { []T, usize
     const slice = std.mem.bytesAsSlice(T, in[alignment .. alignment + real_size]);
 
     return .{ @ptrCast(@alignCast(@constCast(slice))), alignment + real_size };
-
-    //const {s}_vector = @constCast(@as(@TypeOf(result.{s}), @alignCast(std.mem.bytesAsSlice(base.unwrapType(@TypeOf(result.{s})), dest[written.* .. written.* + (len * @sizeOf(base.unwrapType(@TypeOf(result.{s}))))]))));
 }
 
 pub fn ensureAligned(in: usize, align_n: usize) usize {
@@ -667,7 +548,20 @@ test "serialize long string" {
     try std.testing.expectEqualStrings(&expected, dest);
 }
 
-test "deserialize string" {}
+test "deserialize string" {
+    const expected = "hello";
+    const data = [_]u8{ 5, 'h', 'e', 'l', 'l', 'o', 0, 0 };
+
+    var read: usize = 0;
+    try std.testing.expectEqual(expected.len, strDeserializedSize(&data, &read));
+    try std.testing.expectEqual(data.len, read);
+
+    var dest: [expected.len]u8 = undefined;
+    const deserialized = deserializeString(&data, &dest);
+    try std.testing.expectEqual(expected.len, deserialized[0]);
+    try std.testing.expectEqual(data.len, deserialized[1]);
+    try std.testing.expectEqualStrings(expected, &dest);
+}
 
 test "deserialize long string" {
     const allocator = std.testing.allocator;
@@ -698,40 +592,6 @@ pub fn vectorLen(src: []const u8, read: *usize) usize {
     read.* += 8;
 
     return len;
-}
-
-const DeserializeError = error{InvalidBool};
-
-pub fn deserializeTLVector(allocator: std.mem.Allocator, src: []const u8, comptime T: type, deserializer: *const anyopaque) !.{ usize, []*const T } {
-    _ = deserializer;
-    _ = allocator;
-    var ty = T;
-
-    while (@typeInfo(ty).pointer) {
-        ty = @typeInfo(ty).pointer.child;
-
-        var read: usize = 4;
-
-        if (std.mem.readInt(u32, src[0..4], std.builtin.Endian.little) != 0x1cb5c415) {
-            return DeserializeError.InvalidVectorID;
-        }
-
-        //var len: usize = std.mem.readInt(u32, src[4..8], std.builtin.Endian.little);
-        read += 4;
-    }
-}
-
-pub fn deserializeBool(src: []const u8, read: *usize) bool {
-    const id = std.mem.readInt(u32, src[0..4], std.builtin.Endian.little);
-    if (id == 0x997275b5) {
-        read.* += 4;
-        return true;
-    } else if (id == 0xbc799737) {
-        read.* += 4;
-        return false;
-    } else {
-        @panic("Invalid bool id");
-    }
 }
 
 pub fn unwrapType(comptime T: type) type {

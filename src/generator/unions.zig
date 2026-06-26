@@ -253,11 +253,6 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\                size.* += (@alignOf(ProtoRpcError) - 1);
         \\                return 4 + ProtoRpcError.deserializeSize(in[4..], size);  
         \\            }},
-        \\            0x1cb5c415 => {{
-        \\                size.* += (@alignOf(Vector) - 1);
-        \\                return 4 + Vector.deserializeSize(in[4..], size);  
-        \\            }},
-        \\
     , .{});
 
     for (items.items) |item| {
@@ -383,9 +378,6 @@ pub fn generateTLUnion(items: *const std.ArrayList(utils.TlUnionItem), writer: *
         \\            }},
         \\            0x2144ca19 => {{
         \\                return .ProtoRpcError;
-        \\            }},
-        \\            0x1cb5c415 => {{
-        \\                return .Vector;
         \\            }},
         \\            0xae500895 => {{
         \\                return .ProtoFutureSalts;
