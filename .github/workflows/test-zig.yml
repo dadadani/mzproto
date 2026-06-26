@@ -12,10 +12,9 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: install nix
-      uses: cachix/install-nix-action@v31
-      with:
-        nix_path: nixpkgs=channel:nixos-unstable
-        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      uses: DeterminateSystems/nix-installer-action@main
+    - name: setup nix cache
+      uses: DeterminateSystems/magic-nix-cache-action@main
     - name: Write dev.zon
       uses: "DamianReeves/write-file-action@master"
       with:
@@ -33,4 +32,4 @@ jobs:
       run: zig build --summary all test
     - name: build
       shell: 'nix develop -c bash -e {0}'
-      run: zig build
+      run: zig build --summary all
