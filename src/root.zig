@@ -24,6 +24,7 @@ test {
     _ = tl_tests;
     _ = Storage;
     _ = AuthKey;
+    _ = Session;
     _ = AuthKey.generate;
     _ = @import("./lib/crypto/miller_rabin.zig");
     _ = tl;

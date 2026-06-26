@@ -201,6 +201,54 @@ pub const SessionError = error{
 
 pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
 
+const EncryptedMessageLayout = struct {
+    pub const AUTH_KEY_ID = 0;
+    pub const MSG_KEY = AUTH_KEY_ID + 8;
+    pub const SALT = MSG_KEY + 16;
+    pub const SESSION_ID = SALT + 8;
+    pub const MESSAGE_ID = SESSION_ID + 8;
+    pub const SEQNO = MESSAGE_ID + 8;
+    pub const BODY_LEN = SEQNO + 4;
+    pub const BODY = BODY_LEN + 4;
+
+    pub const ENCRYPTED_PAYLOAD = SALT;
+
+    pub inline fn paddingOffset(body_len: usize) usize {
+        return BODY + body_len;
+    }
+
+    pub inline fn encryptedPayloadLen(body_len: usize) usize {
+        return paddingOffset(body_len) - ENCRYPTED_PAYLOAD;
+    }
+
+    pub inline fn paddingLen(body_len: usize) usize {
+        return determineMessagePadding(encryptedPayloadLen(body_len));
+    }
+
+    pub inline fn totalLen(body_len: usize) usize {
+        return paddingOffset(body_len) + paddingLen(body_len);
+    }
+};
+
+const MessageContainerLayout = struct {
+    pub const CONSTRUCTOR = 0;
+    pub const COUNT = CONSTRUCTOR + 4;
+    pub const MESSAGES = COUNT + 4;
+
+    pub const MESSAGE_ID = 0;
+    pub const SEQNO = MESSAGE_ID + 8;
+    pub const BODY_LEN = SEQNO + 4;
+    pub const BODY = BODY_LEN + 4;
+
+    pub inline fn messageOffset(container_body_offset: usize, cursor: usize) usize {
+        return container_body_offset + MESSAGES + cursor;
+    }
+
+    pub inline fn messageEnd(container_body_offset: usize, cursor: usize, body_len: usize) usize {
+        return messageOffset(container_body_offset, cursor) + BODY + body_len;
+    }
+};
+
 pub fn format(
     self: Session,
     writer: *std.Io.Writer,
@@ -1519,12 +1567,14 @@ pub fn sessionSupervisor(self: *Session, allocator: std.mem.Allocator, io: std.I
 
 /// Decrypts an encrypted message in-place.
 fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
-    const auth_key_id = data[0..8];
+    const Layout = EncryptedMessageLayout;
+
+    const auth_key_id = data[Layout.AUTH_KEY_ID..Layout.MSG_KEY];
     if (!std.mem.eql(u8, &self.auth_key_id, auth_key_id)) {
         return SecurityError.AuthKeyMismatch;
     }
 
-    const msg_key = data[8 .. 8 + 16];
+    const msg_key = data[Layout.MSG_KEY..Layout.SALT];
 
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     var a: [32]u8 = undefined;
@@ -1548,9 +1598,9 @@ fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
     @memcpy(iv[8 .. 8 + 16], a[8..24]);
     @memcpy(iv[8 + 16 .. 8 + 16 + 8], b[24..32]);
 
-    ige(data[8 + 16 ..], data[8 + 16 ..], &key, &iv, false);
+    ige(data[Layout.SALT..], data[Layout.SALT..], &key, &iv, false);
 
-    const plaintext = data[8 + 16 ..];
+    const plaintext = data[Layout.SALT..];
 
     // msg_key verification: x = 8 for server→client
     digest = .init(.{});
@@ -1562,14 +1612,14 @@ fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
     }
 
     //const salt = std.mem.readInt(u64, plaintext[0..8], .little); TODO: can we do something with it?
-    const session_id = std.mem.readInt(u64, plaintext[8 .. 8 + 8], .little);
-    const message_data_length = std.mem.readInt(u32, plaintext[8 + 8 + 8 + 4 .. 8 + 8 + 8 + 4 + 4], .little);
+    const session_id = std.mem.readInt(u64, data[Layout.SESSION_ID..Layout.MESSAGE_ID], .little);
+    const message_data_length = std.mem.readInt(u32, data[Layout.BODY_LEN..Layout.BODY], .little);
 
     if (!(message_data_length % 4 == 0 and message_data_length >= 0)) {
         return SecurityError.InvalidMsgLength;
     }
 
-    const padding_len = plaintext.len - 32 - message_data_length;
+    const padding_len = plaintext.len - Layout.encryptedPayloadLen(message_data_length);
     if (padding_len < 12 or message_data_length > plaintext.len) {
         return SecurityError.PaddingMismatch;
     }
@@ -1625,52 +1675,43 @@ inline fn payloadLen(requests: []const Request, requests_extra: []const Request,
         data_size += req.data.len;
     }
 
-    const offset_auth_key_id = 0;
-    const offset_msg_key = offset_auth_key_id + 8;
-    const offset_salt = offset_msg_key + 16;
-    const offset_session_id = offset_salt + 8;
-    const offset_message_id = offset_session_id + 8;
-    const offset_seqno = offset_message_id + 8;
-    const offset_len_data = offset_seqno + 4;
-    const offset_data = offset_len_data + 4;
-    const offset_padding = offset_data + data_size;
-    const offset_end = offset_padding + determineMessagePadding(offset_padding - offset_salt);
-
-    return .{ offset_end, data_size, use_container };
+    return .{ EncryptedMessageLayout.totalLen(data_size), data_size, use_container };
 }
 
 inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: []const Request, requests_extra: []const Request, pending_acks: []const u64, inner_msg_ids: []?u64, out: []u8) void {
-    const offset_auth_key_id = 0;
-    const offset_msg_key = offset_auth_key_id + 8;
-    const offset_salt = offset_msg_key + 16;
-    const offset_session_id = offset_salt + 8;
-    const offset_message_id = offset_session_id + 8;
-    const offset_seqno = offset_message_id + 8;
-    const offset_len_data = offset_seqno + 4;
-    const offset_data = offset_len_data + 4;
-    const offset_padding = offset_data + data_size;
-    const offset_end = offset_padding + determineMessagePadding(offset_padding - offset_salt);
-    _ = offset_end;
+    const offset_data = EncryptedMessageLayout.BODY;
+    const offset_padding = EncryptedMessageLayout.paddingOffset(data_size);
+    const Container = MessageContainerLayout;
+
+    const writeContainerMessage = struct {
+        fn run(dest: []u8, container_body_offset: usize, cursor: usize, msg_id: u64, seqno: u32, body: []const u8) usize {
+            const start = Container.messageOffset(container_body_offset, cursor);
+            const end = Container.messageEnd(container_body_offset, cursor, body.len);
+
+            std.mem.writeInt(u64, @ptrCast(dest[start + Container.MESSAGE_ID .. start + Container.SEQNO]), msg_id, .little);
+            std.mem.writeInt(u32, @ptrCast(dest[start + Container.SEQNO .. start + Container.BODY_LEN]), seqno, .little);
+            std.mem.writeInt(u32, @ptrCast(dest[start + Container.BODY_LEN .. start + Container.BODY]), @intCast(body.len), .little);
+            @memcpy(dest[start + Container.BODY .. end], body);
+
+            return end - (container_body_offset + Container.MESSAGES);
+        }
+    }.run;
 
     const use_container = if (requests.len > 1 or requests_extra.len > 0 or pending_acks.len > 0) true else false;
 
     if (use_container) {
-        std.mem.writeInt(u32, out[offset_data .. offset_data + 4], 0x73f1f8dc, .little);
-        std.mem.writeInt(u32, out[offset_data + 4 .. offset_data + 4 + 4], @intCast(requests.len + requests_extra.len + (if (pending_acks.len > 0) @as(u32, 1) else 0)), .little);
+        std.mem.writeInt(u32, out[offset_data + Container.CONSTRUCTOR .. offset_data + Container.COUNT], 0x73f1f8dc, .little);
+        std.mem.writeInt(u32, out[offset_data + Container.COUNT .. offset_data + Container.MESSAGES], @intCast(requests.len + requests_extra.len + (if (pending_acks.len > 0) @as(u32, 1) else 0)), .little);
 
         var b: usize = 0;
 
         if (pending_acks.len > 0) {
             const msg_id = self.message_id.get(io);
-            // sorry about the hardcoded offsets
-            std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(false), .little);
+            const start = Container.messageOffset(offset_data, b);
+            const body_start = start + Container.BODY;
+            const data_wr = (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serialize(out[body_start..]);
 
-            const data_wr = (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serialize(out[offset_data + 4 + 4 + b + 8 + 4 + 4 ..]);
-
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4]), @intCast(data_wr), .little);
-
-            b += 8 + 4 + 4 + data_wr;
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(false), out[body_start..][0..data_wr]);
         }
 
         var i: usize = 0;
@@ -1686,12 +1727,7 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
                 i += 1;
             }
 
-            std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(req.content_related), .little);
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4]), @intCast(req.data.len), .little);
-            @memcpy(out[offset_data + 4 + 4 + b + 8 + 4 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4 + req.data.len], req.data);
-
-            b += 8 + 4 + 4 + req.data.len;
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data);
         }
 
         for (requests) |req| {
@@ -1705,12 +1741,7 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
                 i += 1;
             }
 
-            std.mem.writeInt(u64, @ptrCast(out[offset_data + 4 + 4 + b .. offset_data + 4 + 4 + b + 8]), msg_id, .little);
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 .. offset_data + 4 + 4 + b + 8 + 4]), self.nextSeqNo(req.content_related), .little);
-            std.mem.writeInt(u32, @ptrCast(out[offset_data + 4 + 4 + b + 8 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4]), @intCast(req.data.len), .little);
-            @memcpy(out[offset_data + 4 + 4 + b + 8 + 4 + 4 .. offset_data + 4 + 4 + b + 8 + 4 + 4 + req.data.len], req.data);
-
-            b += 8 + 4 + 4 + req.data.len;
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data);
         }
 
         return;
@@ -2314,43 +2345,35 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 /// Encrypts raw bytes in-place into a message to be sent directly to Telegram's servers.
 /// The mutex is assumed to be already acquired.
 fn encryptMessage(self: *Session, io: std.Io, data: []u8, seqno: usize, message_id: u64, message_len: usize, comptime bind_key: bool) !void {
-    const offset_auth_key_id = 0;
-    const offset_msg_key = offset_auth_key_id + 8;
-    const offset_salt = offset_msg_key + 16;
-    const offset_session_id = offset_salt + 8;
-    const offset_message_id = offset_session_id + 8;
-    const offset_seqno = offset_message_id + 8;
-    const offset_len_data = offset_seqno + 4;
-    const offset_data = offset_len_data + 4;
-    const offset_padding = offset_data + message_len;
-
-    const padding = determineMessagePadding(offset_padding - offset_salt);
+    const Layout = EncryptedMessageLayout;
+    const offset_padding = Layout.paddingOffset(message_len);
+    const padding = Layout.paddingLen(message_len);
 
     // write data to encrypt
     if (bind_key) {
-        try std.Io.randomSecure(io, data[offset_salt..][0..8]);
-        try std.Io.randomSecure(io, data[offset_session_id..][0..8]);
+        try std.Io.randomSecure(io, data[Layout.SALT..Layout.SESSION_ID]);
+        try std.Io.randomSecure(io, data[Layout.SESSION_ID..Layout.MESSAGE_ID]);
     } else {
-        std.mem.writeInt(u64, data[offset_salt..][0..8], self.getSalt(io).salt, .little);
-        std.mem.writeInt(u64, data[offset_session_id..][0..8], self.session_id, .little);
+        std.mem.writeInt(u64, data[Layout.SALT..Layout.SESSION_ID], self.getSalt(io).salt, .little);
+        std.mem.writeInt(u64, data[Layout.SESSION_ID..Layout.MESSAGE_ID], self.session_id, .little);
     }
-    std.mem.writeInt(u64, data[offset_message_id..][0..8], message_id, .little);
-    std.mem.writeInt(u32, data[offset_seqno..][0..4], @intCast(seqno), .little);
-    std.mem.writeInt(u32, data[offset_len_data..][0..4], @intCast(message_len), .little);
+    std.mem.writeInt(u64, data[Layout.MESSAGE_ID..Layout.SEQNO], message_id, .little);
+    std.mem.writeInt(u32, data[Layout.SEQNO..Layout.BODY_LEN], @intCast(seqno), .little);
+    std.mem.writeInt(u32, data[Layout.BODY_LEN..Layout.BODY], @intCast(message_len), .little);
     try std.Io.randomSecure(io, data[offset_padding .. offset_padding + padding]);
 
     const auth_key_id = if (bind_key) self.perm_auth_key_id else self.auth_key_id;
     const auth_key = if (bind_key) self.perm_auth_key else self.auth_key.auth_key;
 
     // Write auth_key_id
-    @memcpy(data[offset_auth_key_id..offset_msg_key], &auth_key_id);
+    @memcpy(data[Layout.AUTH_KEY_ID..Layout.MSG_KEY], &auth_key_id);
 
     // create message_key
-    const message_key = data[offset_msg_key..offset_salt];
+    const message_key = data[Layout.MSG_KEY..Layout.SALT];
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     digest.update(auth_key[88..120]);
-    digest.update(data[offset_salt .. offset_padding + padding]);
-    @memcpy(data[8 .. 8 + 16], digest.finalResult()[8..24]);
+    digest.update(data[Layout.SALT .. offset_padding + padding]);
+    @memcpy(data[Layout.MSG_KEY..Layout.SALT], digest.finalResult()[8..24]);
 
     var a: [32]u8 = undefined;
     digest = .init(.{});
@@ -2374,7 +2397,7 @@ fn encryptMessage(self: *Session, io: std.Io, data: []u8, seqno: usize, message_
     @memcpy(iv[8 .. 8 + 16], a[8..24]);
     @memcpy(iv[8 + 16 .. 8 + 16 + 8], b[24..32]);
 
-    ige(data[offset_salt .. offset_padding + padding], data[offset_salt .. offset_padding + padding], &key, &iv, true);
+    ige(data[Layout.SALT .. offset_padding + padding], data[Layout.SALT .. offset_padding + padding], &key, &iv, true);
 }
 
 /// Executes a graceful shutdown, so that all the pending requests are processed before terminating the connection.
@@ -2538,4 +2561,85 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
     var auth_key_id: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
+}
+
+test "encrypted message layout offsets and padding" {
+    const Layout = EncryptedMessageLayout;
+
+    try std.testing.expectEqual(@as(usize, 0), Layout.AUTH_KEY_ID);
+    try std.testing.expectEqual(@as(usize, 8), Layout.MSG_KEY);
+    try std.testing.expectEqual(@as(usize, 24), Layout.SALT);
+    try std.testing.expectEqual(@as(usize, 32), Layout.SESSION_ID);
+    try std.testing.expectEqual(@as(usize, 40), Layout.MESSAGE_ID);
+    try std.testing.expectEqual(@as(usize, 48), Layout.SEQNO);
+    try std.testing.expectEqual(@as(usize, 52), Layout.BODY_LEN);
+    try std.testing.expectEqual(@as(usize, 56), Layout.BODY);
+
+    try std.testing.expectEqual(@as(usize, 32), Layout.encryptedPayloadLen(0));
+    try std.testing.expectEqual(@as(usize, 16), Layout.paddingLen(0));
+    try std.testing.expectEqual(@as(usize, 72), Layout.totalLen(0));
+
+    try std.testing.expectEqual(@as(usize, 36), Layout.encryptedPayloadLen(4));
+    try std.testing.expectEqual(@as(usize, 12), Layout.paddingLen(4));
+    try std.testing.expectEqual(@as(usize, 72), Layout.totalLen(4));
+
+    try std.testing.expectEqual(@as(usize, 52), Layout.encryptedPayloadLen(20));
+    try std.testing.expectEqual(@as(usize, 12), Layout.paddingLen(20));
+    try std.testing.expectEqual(@as(usize, 88), Layout.totalLen(20));
+}
+
+test "processBatch emits encrypted packet with expected outer layout" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var perm_auth_key: [256]u8 = undefined;
+    var temp_auth_key: [256]u8 = undefined;
+    for (&perm_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 17 + 3) % 251);
+    }
+    for (&temp_auth_key, 0..) |*byte, i| {
+        byte.* = @intCast((i * 31 + 11) % 251);
+    }
+
+    var client_manager: ClientManager = undefined;
+    var session: Session = undefined;
+    try session.init(io, &client_manager, &perm_auth_key, .{ .id = 2, .testmode = true }, 0);
+    defer session.deinit(io, allocator);
+
+    session.session_id = 0x1122334455667788;
+    session.auth_key = .{
+        .auth_key = temp_auth_key,
+        .first_salt = 0x8877665544332211,
+        .expiration = null,
+    };
+    var temp_auth_key_sha1: [20]u8 = undefined;
+    std.crypto.hash.Sha1.hash(&temp_auth_key, &temp_auth_key_sha1, .{});
+    @memcpy(&session.auth_key_id, temp_auth_key_sha1[12..20]);
+
+    try session.salts.append(allocator, .{
+        .salt = session.auth_key.first_salt,
+        .valid_since = 0,
+        .valid_until = std.math.maxInt(i32),
+    });
+
+    const holder, const dummy = try TransportConnector.dummyTransport(allocator);
+    defer holder.deinit(io);
+
+    const body = try allocator.dupe(u8, &[_]u8{ 0x04, 0x03, 0x02, 0x01 });
+    var batch = [_]Request{.{
+        .id = null,
+        .data = body,
+        .content_related = false,
+        .message_id = 0x0000000100000000,
+    }};
+
+    try session.processBatch(allocator, io, holder.transport, &batch);
+
+    const packet = try dummy.serverRecv(io);
+    defer allocator.free(packet);
+
+    try std.testing.expectEqual(EncryptedMessageLayout.totalLen(body.len), packet.len);
+    try std.testing.expectEqualSlices(u8, &session.auth_key_id, packet[EncryptedMessageLayout.AUTH_KEY_ID..EncryptedMessageLayout.MSG_KEY]);
+    try std.testing.expect(!std.mem.allEqual(u8, packet[EncryptedMessageLayout.MSG_KEY..EncryptedMessageLayout.SALT], 0));
+    try std.testing.expectEqual(@as(usize, 16), packet[EncryptedMessageLayout.MSG_KEY..EncryptedMessageLayout.SALT].len);
 }

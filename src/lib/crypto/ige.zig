@@ -50,8 +50,8 @@ test "ige encryption & decryption" {
     var key: [32]u8 = undefined;
     var iv: [32]u8 = undefined;
 
-    std.crypto.random.bytes(&key);
-    std.crypto.random.bytes(&iv);
+    try std.Io.randomSecure(std.testing.io, &key);
+    try std.Io.randomSecure(std.testing.io, &iv);
 
     ige(text, &dest, &key, &iv, true);
 
