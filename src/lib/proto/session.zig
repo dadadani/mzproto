@@ -25,31 +25,25 @@ pub fn isContentRelated(obj: tl.TL.Enum) bool {
 
         // A client must never mark msgs_ack, msg_container, msg_copy, gzip_packed constructors (i.e. containers and acknowledgements)
         // as content-related, or else a bad_msg_notification with error_code=34 will be emitted.
-        .ProtoRpcDropAnswer,
-        .ProtoRpcAnswerUnknown,
-        .ProtoRpcAnswerDroppedRunning,
-        .ProtoRpcAnswerDropped,
-        .ProtoGetFutureSalts,
-        .ProtoFutureSalt,
-        .ProtoFutureSalts,
+
+        .ProtoMsgsAck,
+        .ProtoMessageContainer,
+        //.ProtoMsgCopy,
+        .ProtoGzipPacked,
+
+        // Service messages documented as not requiring acknowledgment.
         .ProtoPing,
         .ProtoPong,
         .ProtoPingDelayDisconnect,
-        .ProtoDestroySession,
-        .ProtoDestroySessionOk,
-        .ProtoDestroySessionNone,
-        .ProtoMessageContainer,
-        .ProtoGzipPacked,
-        .ProtoHttpWait,
-        .ProtoMsgsAck,
+        .ProtoFutureSalt,
+        .ProtoFutureSalts,
         .ProtoBadMsgNotification,
         .ProtoBadServerSalt,
-        .ProtoMsgsStateReq,
         .ProtoMsgsStateInfo,
         .ProtoMsgsAllInfo,
         .ProtoMsgDetailedInfo,
         .ProtoMsgNewDetailedInfo,
-        .ProtoMsgResendReq,
+        .ProtoHttpWait,
         => false,
 
         // A client must always mark all API-level RPC queries as content-related,
@@ -108,6 +102,8 @@ const Request = struct {
 
 ping_disconnect: bool = false, // if this is set to true, the connection must be closed after the timeout is set
 ping_value: u32 = 0,
+
+new_session_message_id: u64 = 0,
 
 seq_no: usize,
 
@@ -818,11 +814,19 @@ fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Alloca
     var buf: [@sizeOf(tl.ProtoNewSessionCreated)]u8 align(@alignOf(tl.ProtoNewSessionCreated)) = undefined;
     const new_session, _, _ = tl.ProtoNewSessionCreated.deserialize(message.body[4..], &buf);
 
-    log.debug("NewSessionCreated received from server, first_msg_id: {} - {f}", .{ new_session.first_msg_id, self.dc });
-
     {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
+
+        // Especially when the session is first created, the connection might die before the client has a chance to acknowledge the message,
+        //  so we keep track of the message id of the last message sent to prevent duplicates
+
+        if (self.new_session_message_id == message.msg_id) {
+            return;
+        }
+        self.new_session_message_id = message.msg_id;
+
+        log.debug("NewSessionCreated received from server, first_msg_id: {} - {f}", .{ new_session.first_msg_id, self.dc });
 
         self.resendUnprocessedRequests(allocator, io, new_session.first_msg_id);
 
@@ -916,7 +920,8 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             },
         }
 
-        if (isContentRelated(ty)) {
+        // if the seqno is odd, then it needs to be acknowledged
+        if ((message.seqno & 1) != 0) {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
 
@@ -1301,6 +1306,11 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
     };
 }
 
+/// Extracts the base message state from a state byte containing additional status flags.
+fn messageStateCode(info: u8) u3 {
+    return @truncate(info);
+}
+
 fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, id_messages: []const u64, data: []const u8) std.Io.Cancelable!void {
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
@@ -1312,7 +1322,7 @@ fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, id_me
     for (data, 0..) |info, i| {
         if (self.pending_answers_idmap.get(id_messages[i])) |id| {
             if (self.pending_answers.map.get(id)) |answer| {
-                switch (info) {
+                switch (messageStateCode(info)) {
                     // 1 = nothing is known about the message (msg\_id too low,
                     // the other party may have forgotten it)
                     //
@@ -1336,7 +1346,7 @@ fn pushStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, id_me
                     //   +32 = RPC query contained in message being processed or processing already complete
                     //   +64 = content-related response to message already generated
                     //   +128 = other party knows for a fact that message is already received
-                    4...237 => {
+                    4 => {
                         answer.status = .ack;
                         answer.last_probed_at = .now(io, .boot);
                     },
@@ -1535,6 +1545,8 @@ fn decryptMessage(self: *Session, io: std.Io, data: []u8) !void {
     if (header.session_id != self.session_id) {
         return SecurityError.SessionIdMismatch;
     }
+
+    self.ping_disconnect = false;
 }
 
 inline fn payloadLen(requests: []const Request, requests_extra: []const Request, pending_acks: []const u64) struct { usize, usize, bool } {
@@ -2419,6 +2431,13 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
     var auth_key_id: [20]u8 = undefined;
     std.crypto.hash.Sha1.hash(self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
+}
+
+test "message state flags do not change the base state" {
+    const all_flags = 8 | 16 | 32 | 64 | 128;
+
+    try std.testing.expectEqual(@as(u3, 1), messageStateCode(1 | all_flags));
+    try std.testing.expectEqual(@as(u3, 4), messageStateCode(4 | all_flags));
 }
 
 test "processBatch emits decryptable client packet" {
