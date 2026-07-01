@@ -408,6 +408,7 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
             // the correct salt, and the message is to be re-sent with it)
             .ProtoBadServerSalt => |x| {
                 log.warn("got ProtoBadServerSalt - {f}", .{self.dc});
+                self.requesting_salts = false;
                 if (self.salts.items.len == 0) {
                     try self.salts.append(allocator, .{
                         .salt = x.new_server_salt,
@@ -695,6 +696,8 @@ inline fn handleFutureSalt(self: *Session, io: std.Io, allocator: std.mem.Alloca
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
+    self.requesting_salts = false;
+
     try self.salts.append(allocator, future_salt.*);
 }
 
@@ -830,7 +833,10 @@ fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Alloca
 
         self.resendUnprocessedRequests(allocator, io, new_session.first_msg_id);
 
-        if (self.salts.items.len == 0) {
+        if (self.salts.items.len > 0) {
+            self.salts.shrinkAndFree(allocator, 1);
+            self.salts.items[0] = .{ .salt = new_session.server_salt, .valid_since = 0, .valid_until = 0 };
+        } else {
             try self.salts.append(allocator, .{
                 .salt = new_session.server_salt,
                 .valid_since = 0,
@@ -916,7 +922,7 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
             .ProtoMsgsStateInfo => try self.handleStateInfo(allocator, io, message),
             else => {
-                // std.debug.print("got {any} to handle", .{ty});
+                // TODO: send to client manager
             },
         }
 
