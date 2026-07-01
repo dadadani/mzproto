@@ -153,7 +153,7 @@ bootstrap_queue: std.Io.Queue(Request),
 current_id: std.atomic.Value(u32) = .init(0),
 shutdown: std.atomic.Value(bool) = .init(false),
 pending_requests: std.atomic.Value(u32) = .init(0),
-shutdown_event: std.Io.Event = .unset,
+no_pending_requests_event: std.Io.Event = .unset,
 freeze_requests: std.atomic.Value(bool) = .init(false),
 freeze_event: std.Io.Event = .unset,
 auth_key_bound_event: std.Io.Event = .unset,
@@ -942,25 +942,39 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
 
 fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transport: *Transport) std.Io.Cancelable!void {
     while (true) {
-        const len = transport.recvLen(io) catch {
+        const len = transport.recvLen(io) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return std.Io.Cancelable.Canceled;
+            }
             std.Io.checkCancel(io) catch {
-                return;
+                return std.Io.Cancelable.Canceled;
             };
             self.requestReconnect(io, .reconnect_only);
+
             return;
         };
 
         const buf = allocator.alloc(u8, len) catch {
             self.requestReconnect(io, .reconnect_only);
+
             return;
         };
-        defer allocator.free(buf);
+        defer {
+            // ZIG BUG: cancellation points are discarded in some cases. make sure that they propagate later with cancel protection
+            const prev = io.swapCancelProtection(.blocked);
+            defer _ = io.swapCancelProtection(prev);
+            allocator.free(buf);
+        }
 
-        _ = transport.recv(io, buf) catch {
+        _ = transport.recv(io, buf) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return std.Io.Cancelable.Canceled;
+            }
             std.Io.checkCancel(io) catch {
-                return;
+                return std.Io.Cancelable.Canceled;
             };
             self.requestReconnect(io, .reconnect_only);
+
             return;
         };
 
@@ -977,11 +991,15 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
         }
 
         self.decryptMessage(io, buf) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return std.Io.Cancelable.Canceled;
+            }
             std.Io.checkCancel(io) catch {
-                return;
+                return std.Io.Cancelable.Canceled;
             };
             log.err("failed to decrypt message ({s}) - {f}", .{ @errorName(err), self.dc });
             self.requestReconnect(io, .refresh_temp_key);
+
             return;
         };
 
@@ -1025,9 +1043,12 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
 
         log.debug("Incoming message, type {any} - {f}", .{ tl.TL.identify(std.mem.readInt(u32, @ptrCast(message.body[0..4]), .little)), self.dc });
 
-        self.processMessage(io, allocator, message) catch {
+        self.processMessage(io, allocator, message) catch |err| {
+            if (err == std.Io.Cancelable.Canceled) {
+                return std.Io.Cancelable.Canceled;
+            }
 
-            // TODO: handle error correctly
+            // TODO: handle errors correctly
             continue;
         };
     }
@@ -1065,13 +1086,13 @@ fn prepareNewTempAuthKey(self: *Session, allocator: std.mem.Allocator, io: std.I
         };
     }
 
-    self.shutdown_event.reset();
+    self.no_pending_requests_event.reset();
 
     if (self.pending_requests.load(.acquire) == 0) {
-        self.shutdown_event.set(io);
+        self.no_pending_requests_event.set(io);
     }
 
-    try self.shutdown_event.wait(io);
+    try self.no_pending_requests_event.wait(io);
 
     self.conn_restart.set(io);
 }
@@ -2052,7 +2073,8 @@ fn writerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
             }
             if (err == std.Io.QueueClosedError.Closed) {
                 // TODO: what to do?
-                return;
+
+                return std.Io.Cancelable.Canceled;
             }
             return;
         };
@@ -2085,7 +2107,7 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
     defer {
         const sub = self.pending_requests.fetchSub(1, .seq_cst);
         if (sub == 1) {
-            self.shutdown_event.set(io);
+            self.no_pending_requests_event.set(io);
         }
     }
 
@@ -2135,7 +2157,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
     defer {
         const sub = self.pending_requests.fetchSub(1, .seq_cst);
         if (sub == 1) {
-            self.shutdown_event.set(io);
+            self.no_pending_requests_event.set(io);
         }
     }
 
@@ -2297,13 +2319,13 @@ pub fn gracefulShutdown(self: *Session, io: std.Io) void {
         self.freeze_requests.store(false, .release);
         self.conn_restart.set(io);
 
-        self.shutdown_event.reset();
+        self.no_pending_requests_event.reset();
     }
     if (self.pending_requests.load(.acquire) == 0) {
-        self.shutdown_event.set(io);
+        self.no_pending_requests_event.set(io);
     }
 
-    self.shutdown_event.waitUncancelable(io);
+    self.no_pending_requests_event.waitUncancelable(io);
 }
 
 /// Signals all pending requests and prevents new ones.
@@ -2315,7 +2337,7 @@ pub fn destroyRequests(self: *Session, allocator: std.mem.Allocator, io: std.Io)
         defer self.mutex.unlock(io);
 
         self.shutdown.store(true, .release);
-        self.shutdown_event.reset();
+        self.no_pending_requests_event.reset();
 
         self.freeze_requests.store(false, .release);
 
@@ -2330,11 +2352,11 @@ pub fn destroyRequests(self: *Session, allocator: std.mem.Allocator, io: std.Io)
         }
 
         if (self.pending_requests.load(.acquire) == 0) {
-            self.shutdown_event.set(io);
+            self.no_pending_requests_event.set(io);
         }
     }
 
-    self.shutdown_event.waitUncancelable(io);
+    self.no_pending_requests_event.waitUncancelable(io);
 }
 
 /// Before calling this function, make sure no worker is running and to have deleted every event in `pending_requests` (use `destroyRequests` for that)
@@ -2426,7 +2448,7 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
         .shutdown = .init(false),
         .pending_requests = .init(0),
         .pending_containers = .empty,
-        .shutdown_event = .unset,
+        .no_pending_requests_event = .unset,
         .mutex = .init,
         .pending_answers_idmap = .{},
         .requests_queue = .init(&self.requests_queue_buffer),
@@ -2612,26 +2634,24 @@ test "concurrent rpc queries" {
     const SessionTestServer = @import("./session_test_server.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const request_count = 3;
+    const request_count = 4;
 
     var perm_auth_key: [256]u8 = undefined;
     var temp_auth_key: [256]u8 = undefined;
-    for (&perm_auth_key, 0..) |*byte, i| {
-        byte.* = @intCast((i * 17 + 3) % 251);
-    }
-    for (&temp_auth_key, 0..) |*byte, i| {
-        byte.* = @intCast((i * 31 + 11) % 251);
-    }
+
+    std.Io.random(io, &perm_auth_key);
+    std.Io.random(io, &temp_auth_key);
 
     var client_manager: ClientManager = undefined;
     var session: Session = undefined;
     try session.init(io, &client_manager, &perm_auth_key, .{ .id = 2, .testmode = true }, 0);
     defer session.deinit(io, allocator);
 
-    session.session_id = 0x1122334455667788;
+    std.Io.random(io, @ptrCast(&session.session_id));
+
     session.auth_key = .{
         .auth_key = temp_auth_key,
-        .first_salt = 0x8877665544332211,
+        .first_salt = 1234567,
         .expiration = null,
     };
     var temp_auth_key_sha1: [20]u8 = undefined;
@@ -2656,7 +2676,32 @@ test "concurrent rpc queries" {
         ping_id: u64,
     };
 
-    const ScriptedServer = struct {
+    var send_count: std.atomic.Value(u32) = .init(0);
+    var finish_event: std.Io.Event = .unset;
+
+    const sendPing = struct {
+        fn run(test_session: *Session, test_allocator: std.mem.Allocator, test_io: std.Io, ping_id: u64, result: *u64, vsend_count: *std.atomic.Value(u32), vfinish_event: *std.Io.Event) std.Io.Cancelable!void {
+            _ = vsend_count.fetchAdd(1, .seq_cst);
+            defer {
+                const sub = vsend_count.fetchSub(1, .seq_cst);
+                if (sub == 1) {
+                    vfinish_event.set(io);
+                }
+            }
+            const response = test_session.send(test_io, test_allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false) catch unreachable;
+            defer response.deinit(test_allocator);
+
+            switch (response.data) {
+                .ProtoPong => |pong| {
+                    std.testing.expectEqual(ping_id, pong.ping_id) catch unreachable;
+                    result.* = pong.ping_id;
+                },
+                else => unreachable,
+            }
+        }
+    }.run;
+
+    const TestServer = struct {
         fn appendPing(out: *[request_count]ClientRequest, out_len: *usize, msg_id: u64, body: []const u8) void {
             std.testing.expect(out_len.* < out.len) catch unreachable;
             std.testing.expectEqual(tl.TL.Enum.ProtoPing, tl.TL.identify(std.mem.readInt(u32, body[0..4], .little)).?) catch unreachable;
@@ -2741,97 +2786,57 @@ test "concurrent rpc queries" {
             const container_msg_id = first_msg_id + @as(u64, @intCast(request_count)) * 4;
             test_server.sendRpcResultContainer(test_allocator, test_io, container_msg_id, &responses) catch unreachable;
         }
-    };
 
-    const SendWorker = struct {
-        fn run(test_session: *Session, test_allocator: std.mem.Allocator, test_io: std.Io, ping_id: u64, remaining: *std.atomic.Value(u32), all_done: *std.Io.Event, result: *u64) std.Io.Cancelable!void {
-            defer if (remaining.fetchSub(1, .seq_cst) == 1) all_done.set(test_io);
-
-            const response = test_session.send(test_io, test_allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false) catch unreachable;
-            defer response.deinit(test_allocator);
-
-            switch (response.data) {
-                .ProtoPong => |pong| {
-                    std.testing.expectEqual(ping_id, pong.ping_id) catch unreachable;
-                    result.* = pong.ping_id;
-                },
-                else => unreachable,
-            }
+        fn kill(iooo: std.Io) std.Io.Cancelable!void {
+            const sleep: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .boot } };
+            try sleep.sleep(iooo);
+            @panic("timeout");
         }
     };
 
-    const CompletionWait = struct {
-        fn wait(event: *std.Io.Event, test_io: std.Io) !void {
-            const Result = union(enum) {
-                completed: std.Io.Cancelable!void,
-                timeout: std.Io.Cancelable!void,
-            };
-            const Select = std.Io.Select(Result);
-            const completion_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .boot } };
-
-            var buffer: [2]Result = undefined;
-            var select = Select.init(test_io, &buffer);
-            try select.concurrent(.completed, std.Io.Event.wait, .{ event, test_io });
-            try select.concurrent(.timeout, std.Io.Timeout.sleep, .{ completion_timeout, test_io });
-
-            const result = try select.await();
-            _ = select.cancel();
-
-            switch (result) {
-                .completed => |completed| try completed,
-                .timeout => |timed_out| {
-                    try timed_out;
-                    return error.Timeout;
-                },
-            }
-        }
-    };
+    var group2: std.Io.Group = .init;
+    try group2.concurrent(io, TestServer.kill, .{io});
 
     var group: std.Io.Group = .init;
-    defer group.cancel(io);
+    defer {
+        group.cancel(io);
+        group2.cancel(io);
+    }
+    try group.concurrent(io, Session.writerWorker, .{ &session, io, allocator, holder.transport });
+    try group.concurrent(io, Session.readerWorker, .{ &session, io, allocator, holder.transport });
 
-    const ping_ids = [request_count]u64{
-        0x1011121314151617,
-        0x2021222324252627,
-        0x3031323334353637,
-    };
-    var remaining: std.atomic.Value(u32) = .init(request_count);
-    var all_done: std.Io.Event = .unset;
+    var ping_ids: [request_count]u64 = undefined;
+
+    for (0..ping_ids.len) |i| {
+        std.Io.random(io, @ptrCast(&ping_ids[i]));
+    }
+
+    try group.concurrent(io, TestServer.run, .{ &server, &session, allocator, io, &ping_ids });
+
     var results: [request_count]u64 = @splat(0);
 
     for (ping_ids, 0..) |ping_id, i| {
-        try group.concurrent(io, SendWorker.run, .{ &session, allocator, io, ping_id, &remaining, &all_done, &results[i] });
+        try group.concurrent(io, sendPing, .{ &session, allocator, io, ping_id, &results[i], &send_count, &finish_event });
     }
 
-    const poll_interval: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .boot } };
-    var queued = false;
-    for (0..1000) |_| {
-        try session.mutex.lock(io);
-        const pending_count = session.pending_answers.map.count();
-        session.mutex.unlock(io);
+    const sleep: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .boot } };
 
-        if (pending_count == request_count) {
-            queued = true;
-            break;
+    finish_event.waitTimeout(io, sleep) catch |err| {
+        if (err == std.Io.Event.WaitTimeoutError.Timeout) {
+            log.err("no_pending_requests_event timed out. pending requests: {d}", .{send_count.load(.seq_cst)});
         }
+        return err;
+    };
 
-        try poll_interval.sleep(io);
-    }
-    try std.testing.expect(queued);
-    try poll_interval.sleep(io);
-
-    try group.concurrent(io, Session.writerWorker, .{ &session, io, allocator, holder.transport });
-    try group.concurrent(io, Session.readerWorker, .{ &session, io, allocator, holder.transport });
-    try group.concurrent(io, ScriptedServer.run, .{ &server, &session, allocator, io, &ping_ids });
-
-    try CompletionWait.wait(&all_done, io);
+    try std.testing.expectEqual(@as(u32, 0), send_count.load(.seq_cst));
 
     try std.testing.expectEqualSlices(u64, &ping_ids, &results);
-
-    try session.mutex.lock(io);
-    defer session.mutex.unlock(io);
-    try std.testing.expectEqual(@as(usize, 0), session.pending_answers.map.count());
-    try std.testing.expectEqual(@as(usize, 0), session.pending_answers_idmap.count());
-    try std.testing.expectEqual(@as(usize, 0), session.pending_containers.count());
-    try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
+    {
+        try session.mutex.lock(io);
+        defer session.mutex.unlock(io);
+        try std.testing.expectEqual(@as(usize, 0), session.pending_answers.map.count());
+        try std.testing.expectEqual(@as(usize, 0), session.pending_answers_idmap.count());
+        try std.testing.expectEqual(@as(usize, 0), session.pending_containers.count());
+        try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
+    }
 }

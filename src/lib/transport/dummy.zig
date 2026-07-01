@@ -34,7 +34,10 @@ pub fn serverWrite(self: *Dummy, io: std.Io, buf: []const u8) !void {
 
 pub fn recvLen(self: *Dummy, io: std.Io) Error!usize {
     try self.mutex.lock(io);
-    defer self.mutex.unlock(io);
+
+    defer {
+        self.mutex.unlock(io);
+    }
     if (self.client_recv_buf) |_| {
         return self.buf_len_remaining;
     }
@@ -47,14 +50,20 @@ pub fn recvLen(self: *Dummy, io: std.Io) Error!usize {
         return Error.WriteFailed;
     };
 
+    try std.Io.checkCancel(io);
+
     self.client_recv_buf = buf;
     self.buf_len_remaining = buf.len;
     return self.buf_len_remaining;
 }
 
 pub fn recv(self: *Dummy, io: std.Io, buf: []u8) Error!usize {
+
     try self.mutex.lock(io);
-    defer self.mutex.unlock(io);
+
+    defer {
+        self.mutex.unlock(io);
+    }
 
     if (self.client_recv_buf) |recv_buf| {
         if (buf.len == 0) {
