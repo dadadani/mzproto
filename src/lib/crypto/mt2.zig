@@ -169,8 +169,15 @@ pub fn decrypt(data: []u8, expected_auth_key_id: *const [8]u8, auth_key: *const 
         return Error.InvalidMsgLength;
     }
 
+    if (Layout.encryptedPayloadLen(body_len) > plaintext.len) {
+        return Error.InvalidMsgLength;
+    }
+
     const padding_len = plaintext.len - Layout.encryptedPayloadLen(body_len);
     if (padding_len < 12) {
+        return Error.PaddingMismatch;
+    }
+    if (padding_len > 1024) {
         return Error.PaddingMismatch;
     }
 

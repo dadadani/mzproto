@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const Error = error{
+    TLFailedParse,
+};
+
 pub const ProtoMessage = struct {
     msg_id: u64,
     seqno: i32,
@@ -25,8 +29,15 @@ pub const ProtoMessage = struct {
 };
 
 pub const ProtoMessageContainer = struct {
-    pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) std.mem.Allocator.Error![]ProtoMessage {
+    pub fn deserializeContainer(allocator: std.mem.Allocator, in: []const u8) (std.mem.Allocator.Error || Error)![]ProtoMessage {
+        if (in.len < 4) {
+            return Error.TLFailedParse;
+        }
         const len = std.mem.readInt(u32, in[0..4], .little);
+        // Officially Telegram states that containers might only contain up to 1024 elements, so we do that too here
+        if (len > 1024) {
+            return Error.TLFailedParse;
+        }
 
         const container = try allocator.alloc(ProtoMessage, len);
         errdefer allocator.free(container);
@@ -34,14 +45,21 @@ pub const ProtoMessageContainer = struct {
         var read: usize = 4;
 
         for (0..len) |i| {
-            container[i].msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), std.builtin.Endian.little);
+            if (in[read..].len < 8 + 4 + 4) {
+                return Error.TLFailedParse;
+            }
+            container[i].msg_id = std.mem.readInt(u64, @ptrCast(in[read .. read + 8]), .little);
             read += 8;
 
-            container[i].seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            container[i].seqno = std.mem.readInt(i32, @ptrCast(in[read .. read + 4]), .little);
             read += 4;
 
-            const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), std.builtin.Endian.little);
+            const bytes = std.mem.readInt(u32, @ptrCast(in[read .. read + 4]), .little);
             read += 4;
+
+            if (in[read..].len < bytes) {
+                return Error.TLFailedParse;
+            }
 
             container[i].body = in[read .. read + bytes];
 

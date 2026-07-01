@@ -57,6 +57,7 @@ pub fn boilerplate(io: std.Io, filename: []const u8, writer: *std.Io.Writer) !vo
             \\
             \\pub const LAYER_VERSION = {d};
             \\
+            \\pub const Error = base.Error;
             \\pub const ProtoMessageContainer = base.ProtoMessageContainer;
             \\pub const ProtoMessage = base.ProtoMessage;
             \\pub const ProtoRPCResult = base.ProtoRPCResult();

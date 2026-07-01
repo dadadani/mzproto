@@ -80,18 +80,18 @@ pub fn write(self: *StreamAbridged, io: std.Io, buf: []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
-    if (buf.len < 0x7F) {
-        const len = @as(u8, @intCast(buf.len / 4));
+    const len = buf.len / 4;
 
-        _ = try self.writer.interface.writeVec(&.{ &.{len}, buf });
+    if (len < 0x7F) {
+        _ = try self.writer.interface.writeVec(&.{ &.{@as(u8, @intCast(len))}, buf });
         try self.writer.interface.flush();
     } else {
-        if (buf.len > std.math.maxInt(u24)) {
+        if (len > std.math.maxInt(u24)) {
             return Error.WriteFailed;
         }
         var buf_dest: [3]u8 = undefined;
-        std.mem.writeInt(u24, &buf_dest, @as(u24, @intCast(buf.len)), .little);
-        _ = try self.writer.interface.writeVec(&.{ &.{0x7F}, buf_dest[0..3], buf });
+        std.mem.writeInt(u24, &buf_dest, @as(u24, @intCast(len)), .little);
+        _ = try self.writer.interface.writeVec(&.{ &.{ 0x7f, buf_dest[0], buf_dest[1], buf_dest[2] }, buf });
         try self.writer.interface.flush();
     }
 }
@@ -111,7 +111,7 @@ pub fn writeVec(self: *StreamAbridged, io: std.Io, buf: []const []const u8) !voi
         _ = try self.writer.interface.writeVec(buf);
         try self.writer.interface.flush();
     } else {
-        if (buf.len > std.math.maxInt(u24)) {
+        if (len > std.math.maxInt(u24)) {
             return Error.WriteFailed;
         }
         var buf_dest: [3]u8 = undefined;

@@ -195,7 +195,7 @@ pub const SessionError = error{
     TransportUnknown,
 };
 
-pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable;
+pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable || tl.Error;
 
 const MessageContainerLayout = struct {
     pub const CONSTRUCTOR = 0;
@@ -461,13 +461,15 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
                     // a higher or an equal and odd seqno)
                     32 => {
                         log.warn("got ProtoBadMsgNotification, msg_seqno too low - {f}", .{self.dc});
-                        self.seq_no += 64;
+                        self.seq_no += 1;
                     },
                     // msg_seqno too high (similarly, there is a message
                     // with a higher msg_id but with either a lower or an equal and odd seqno)
                     33 => {
                         log.warn("got ProtoBadMsgNotification, msg_seqno too high  -{f}", .{self.dc});
-                        self.seq_no -= 16;
+                        if (self.seq_no > 0) {
+                            self.seq_no -= 1;
+                        }
                     },
                     // an even msg_seqno expected (irrelevant message), but odd received
                     34 => {
@@ -949,22 +951,10 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
         };
 
         const buf = allocator.alloc(u8, len) catch {
-            // TODO: handle correctly?
-            continue;
+            self.requestReconnect(io, .reconnect_only);
+            return;
         };
         defer allocator.free(buf);
-
-        if (buf.len == 4) {
-            const code = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
-            log.err("Received transport error {} - {f}", .{ code, self.dc });
-
-            if (code == 404) {
-                //return SessionError.Transport404;
-            }
-            //return SessionError.TransportUnknown;
-            self.requestReconnect(io, .refresh_temp_key);
-            return;
-        }
 
         _ = transport.recv(io, buf) catch {
             std.Io.checkCancel(io) catch {
@@ -973,6 +963,18 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
             self.requestReconnect(io, .reconnect_only);
             return;
         };
+
+        if (buf.len == 4) {
+            const code = std.mem.readInt(i32, @ptrCast(buf[0..4]), .little);
+            log.err("Received transport error {} - {f}", .{ code, self.dc });
+
+            if (code == -404) {
+                //return SessionError.Transport404;
+            }
+            //return SessionError.TransportUnknown;
+            self.requestReconnect(io, .refresh_temp_key);
+            return;
+        }
 
         self.decryptMessage(io, buf) catch |err| {
             std.Io.checkCancel(io) catch {
@@ -1600,15 +1602,16 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
     const Container = MessageContainerLayout;
 
     const writeContainerMessage = struct {
-        fn run(dest: []u8, container_body_offset: usize, cursor: usize, msg_id: u64, seqno: u32, body: []const u8) usize {
+        fn run(dest: []u8, container_body_offset: usize, cursor: usize, msg_id: u64, seqno: u32, body: []const u8, comptime skipBody: bool) usize {
             const start = Container.messageOffset(container_body_offset, cursor);
             const end = Container.messageEnd(container_body_offset, cursor, body.len);
 
             std.mem.writeInt(u64, @ptrCast(dest[start + Container.MESSAGE_ID .. start + Container.SEQNO]), msg_id, .little);
             std.mem.writeInt(u32, @ptrCast(dest[start + Container.SEQNO .. start + Container.BODY_LEN]), seqno, .little);
             std.mem.writeInt(u32, @ptrCast(dest[start + Container.BODY_LEN .. start + Container.BODY]), @intCast(body.len), .little);
-            @memcpy(dest[start + Container.BODY .. end], body);
-
+            if (!skipBody) {
+                @memcpy(dest[start + Container.BODY .. end], body);
+            }
             return end - (container_body_offset + Container.MESSAGES);
         }
     }.run;
@@ -1627,7 +1630,7 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
             const body_start = start + Container.BODY;
             const data_wr = (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serialize(out[body_start..]);
 
-            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(false), out[body_start..][0..data_wr]);
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(false), out[body_start..][0..data_wr], true);
         }
 
         var i: usize = 0;
@@ -1635,29 +1638,29 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
         for (requests_extra) |req| {
             const msg_id = if (req.message_id) |msg_id| msg_id else self.message_id.get(io);
             if (req.id) |id| {
-                self.pending_answers_idmap.putAssumeCapacity(msg_id, id);
-                inner_msg_ids[i] = msg_id;
                 if (self.pending_answers.map.getPtr(id)) |pending_answer| {
+                    self.pending_answers_idmap.putAssumeCapacity(msg_id, id);
+                    inner_msg_ids[i] = msg_id;
                     pending_answer.*.proto_req_id = msg_id;
                 }
                 i += 1;
             }
 
-            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data);
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data, false);
         }
 
         for (requests) |req| {
             const msg_id = if (req.message_id) |msg_id| msg_id else self.message_id.get(io);
             if (req.id) |id| {
-                self.pending_answers_idmap.putAssumeCapacity(msg_id, id);
-                inner_msg_ids[i] = msg_id;
                 if (self.pending_answers.map.getPtr(id)) |pending_answer| {
+                    self.pending_answers_idmap.putAssumeCapacity(msg_id, id);
+                    inner_msg_ids[i] = msg_id;
                     pending_answer.*.proto_req_id = msg_id;
                 }
                 i += 1;
             }
 
-            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data);
+            b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(req.content_related), req.data, false);
         }
 
         return;
@@ -1793,8 +1796,8 @@ fn payload(self: *Session, allocator: std.mem.Allocator, io: std.Io, batch: []Re
     };
     if (!use_container) {
         if (batch[0].id) |id| {
-            try self.pending_answers_idmap.put(allocator, msgid, id);
             if (self.pending_answers.map.getPtr(id)) |pending_answer| {
+                try self.pending_answers_idmap.put(allocator, msgid, id);
                 pending_answer.*.proto_req_id = msgid;
             }
             inner_msg_ids[0] = msgid;
@@ -1816,8 +1819,8 @@ fn payload(self: *Session, allocator: std.mem.Allocator, io: std.Io, batch: []Re
             if (req.id) |id| {
                 if (self.pending_answers.map.get(id)) |answer| {
                     answer.proto_container_id = msgid;
+                    container_id_list.appendAssumeCapacity(id);
                 }
-                container_id_list.appendAssumeCapacity(id);
             }
         }
         if (!prebind) {
@@ -1825,12 +1828,14 @@ fn payload(self: *Session, allocator: std.mem.Allocator, io: std.Io, batch: []Re
                 if (req.id) |id| {
                     if (self.pending_answers.map.get(id)) |answer| {
                         answer.proto_container_id = msgid;
+                        container_id_list.appendAssumeCapacity(id);
                     }
-                    container_id_list.appendAssumeCapacity(id);
                 }
             }
         }
-        self.pending_containers.putAssumeCapacity(msgid, container_id_list);
+        if (container_id_list.items.len > 0) {
+            self.pending_containers.putAssumeCapacity(msgid, container_id_list);
+        }
     }
 
     return .{ buf, inner_msg_ids, if (!use_container) null else msgid };
@@ -2227,6 +2232,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         if (answer.proto_req_id) |proto_req_id| {
             _ = self.pending_answers_idmap.swapRemove(proto_req_id);
         }
+
         self.mutex.unlock(io);
     }
 
