@@ -47,9 +47,9 @@ pub fn recvLen(self: *StreamAbridged, io: std.Io) !usize {
     }
 
     if (self.mode == .FullBytes) {
-        var len: [4]u8 = @splat(0);
+        var len: [3]u8 = @splat(0);
         try self.reader.interface.readSliceAll(len[0..3]);
-        self.len = @as(usize, std.mem.readInt(u32, &len, .little)) * 4;
+        self.len = @as(usize, std.mem.readInt(u24, &len, .little)) * 4;
         self.mode = .Payload;
     }
 
@@ -80,14 +80,17 @@ pub fn write(self: *StreamAbridged, io: std.Io, buf: []const u8) !void {
     try self.mutex_write.lock(io);
     defer self.mutex_write.unlock(io);
 
-    const len = @as(u8, @intCast(buf.len / 4));
+    if (buf.len < 0x7F) {
+        const len = @as(u8, @intCast(buf.len / 4));
 
-    if (len < 0x7F) {
         _ = try self.writer.interface.writeVec(&.{ &.{len}, buf });
         try self.writer.interface.flush();
     } else {
-        var buf_dest: [4]u8 = undefined;
-        std.mem.writeInt(u32, &buf_dest, @as(u32, len), .little);
+        if (buf.len > std.math.maxInt(u24)) {
+            return Error.WriteFailed;
+        }
+        var buf_dest: [3]u8 = undefined;
+        std.mem.writeInt(u24, &buf_dest, @as(u24, @intCast(buf.len)), .little);
         _ = try self.writer.interface.writeVec(&.{ &.{0x7F}, buf_dest[0..3], buf });
         try self.writer.interface.flush();
     }
@@ -108,8 +111,11 @@ pub fn writeVec(self: *StreamAbridged, io: std.Io, buf: []const []const u8) !voi
         _ = try self.writer.interface.writeVec(buf);
         try self.writer.interface.flush();
     } else {
-        var buf_dest: [4]u8 = undefined;
-        std.mem.writeInt(u32, &buf_dest, @as(u32, @intCast(len)), .little);
+        if (buf.len > std.math.maxInt(u24)) {
+            return Error.WriteFailed;
+        }
+        var buf_dest: [3]u8 = undefined;
+        std.mem.writeInt(u24, &buf_dest, @as(u24, @intCast(len)), .little);
         _ = try self.writer.interface.write(&.{ 0x7f, buf_dest[0], buf_dest[1], buf_dest[2] });
         _ = try self.writer.interface.writeVec(buf);
         try self.writer.interface.flush();
