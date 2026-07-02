@@ -150,8 +150,23 @@ const AuthGen = struct {
     fn sendData(self: *AuthGen, data: []const u8) !void {
         var headers: [@sizeOf(i64) + @sizeOf(i64) + @sizeOf(i32)]u8 = undefined;
 
+        // AUTH KEY: 0 (unencrypted)
         @memset(headers[0..8], 0);
-        std.mem.writeInt(i64, headers[8..16], (std.Io.Clock.now(.real, self.io)).toMilliseconds() << 32, .little);
+        // MESSAGE ID
+        {
+            const now_ms = (std.Io.Clock.now(.real, self.io)).toMilliseconds();
+
+            const seconds: u64 = @intCast(@divFloor(now_ms, 1000));
+            const millis: u64 = @intCast(@mod(now_ms, 1000));
+
+            var msg_id = (seconds << 32) | ((millis << 32) / 1000);
+
+            // must be divisible by 4
+            msg_id &= ~@as(u64, 3);
+
+            std.mem.writeInt(u64, headers[8..16], msg_id, .little);
+        }
+        // MESSAGE LENGTH
         std.mem.writeInt(i32, headers[16..20], @intCast(data.len), .little);
 
         var dataa = [_][]const u8{ &headers, data };
