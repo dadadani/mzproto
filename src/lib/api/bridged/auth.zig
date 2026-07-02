@@ -14,6 +14,6 @@ pub fn authenticateBot(client_ptr: *anyopaque, input_token: bapi.ConstString) !b
     }
 
     return self.client_manager.authenticateBot(self.allocator, self.io, token) catch |err| {
-        return .{ .err = .{ .code = 600, .message = @errorName(err) } };
+        return .{ .err = .{ .code = 600, .message = @errorName(err), .error_trace = bapi.copyTraceError(self.allocator, @errorReturnTrace()) } };
     };
 }

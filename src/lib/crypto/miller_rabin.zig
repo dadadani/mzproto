@@ -3,7 +3,7 @@ const std = @import("std");
 const Modulus2048 = std.crypto.ff.Modulus(2048);
 
 pub const default_rounds = 15;
-const small_prime_limit = 100_000;
+const small_prime_limit = 10_000;
 
 const small_primes = calculatePrimeNumbers(small_prime_limit);
 

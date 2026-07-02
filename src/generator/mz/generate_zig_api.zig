@@ -232,7 +232,7 @@ fn emitRuntimeBridgeDispatch(allocator: std.mem.Allocator, writer: *std.Io.Write
         try writer.writeAll(
             "        return switch (result) {\n" ++
                 "            .ok => .{ .ok = {} },\n" ++
-                "            .err => |err| .{ .err = .{ .code = err.code, .message = err.message, .owned = err.owned } },\n" ++
+                "            .err => |err| .{ .err = .{ .code = err.code, .message = err.message, .owned = err.owned, .error_trace =  err.error_trace } },\n" ++
                 "        };\n",
         );
         return;
@@ -243,7 +243,7 @@ fn emitRuntimeBridgeDispatch(allocator: std.mem.Allocator, writer: *std.Io.Write
     try writer.print(
         "        return switch (result) {{\n" ++
             "            .ok => |value| .{{ .ok = {s} }},\n" ++
-            "            .err => |err| .{{ .err = .{{ .code = err.code, .message = err.message, .owned = err.owned }} }},\n" ++
+            "            .err => |err| .{{ .err = .{{ .code = err.code, .message = err.message, .owned = err.owned, .error_trace =  err.error_trace }} }},\n" ++
             "        }};\n",
         .{ok_expr},
     );
@@ -378,7 +378,7 @@ fn emitClientMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
         try writer.writeAll(
             "        return switch (result) {\n" ++
                 "            .ok => .{ .ok = {} },\n" ++
-                "            .err => |err| .{ .err = .{ .code = err.code, .message = err.message, .owned = err.owned } },\n" ++
+                "            .err => |err| .{ .err = .{ .code = err.code, .message = err.message, .owned = err.owned, .error_trace =  err.error_trace } },\n" ++
                 "        };\n" ++
                 "    }\n\n",
         );
@@ -390,7 +390,7 @@ fn emitClientMethod(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema
     try writer.print(
         "        return switch (result) {{\n" ++
             "            .ok => |value| .{{ .ok = {s} }},\n" ++
-            "            .err => |err| .{{ .err = .{{ .code = err.code, .message = err.message, .owned = err.owned }} }},\n" ++
+            "            .err => |err| .{{ .err = .{{ .code = err.code, .message = err.message, .owned = err.owned, .error_trace =  err.error_trace }} }},\n" ++
             "        }};\n" ++
             "    }}\n\n",
         .{ok_expr},
@@ -579,12 +579,17 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\    code: u32,
         \\    message: []const u8,
         \\    owned: bool = false,
+        \\    error_trace: ?*std.builtin.StackTrace = null,
         \\
-        \\    pub fn deinit(self: *MzError, allocator: std.mem.Allocator) void {
+        \\    pub fn deinit(self: *const MzError, allocator: std.mem.Allocator) void {
         \\        if (self.owned and self.message.len > 0) allocator.free(@constCast(self.message));
-        \\        self.* = undefined;
+        \\        if (self.error_trace) |trace| {
+        \\            allocator.free(trace.instruction_addresses);
+        \\            allocator.destory(trace);
+        \\        }
         \\    }
         \\};
+        \\
         \\
         \\fn hasDeinit(comptime T: type) bool {
         \\    return switch (@typeInfo(T)) {

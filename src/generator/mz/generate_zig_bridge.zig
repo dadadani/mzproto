@@ -346,12 +346,35 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\    code: u32,
         \\    message: []const u8,
         \\    owned: bool = false,
+        \\    error_trace: ?*std.builtin.StackTrace = null,
         \\
-        \\    pub fn deinit(self: *MzError, allocator: std.mem.Allocator) void {
+        \\    pub fn deinit(self: *const MzError, allocator: std.mem.Allocator) void {
         \\        if (self.owned and self.message.len > 0) allocator.free(@constCast(self.message));
-        \\        self.* = undefined;
+        \\        if (self.error_trace) |trace| {
+        \\            allocator.free(trace.instruction_addresses);
+        \\            allocator.destory(trace);
+        \\        }
         \\    }
         \\};
+        \\
+        \\pub inline fn copyTraceErrorFailable(allocator: std.mem.Allocator, trace: *const std.builtin.StackTrace) !*std.builtin.StackTrace {
+        \\    const dest = try allocator.create(std.builtin.StackTrace);
+        \\    errdefer allocator.destroy(dest);
+        \\    
+        \\    const addresses = try allocator.dupe(usize, trace.instruction_addresses);
+        \\    
+        \\    dest.instruction_addresses = addresses;
+        \\    dest.index = trace.index;
+        \\    
+        \\    return dest;
+        \\}
+        \\
+        \\pub fn copyTraceError(allocator: std.mem.Allocator, trace: ?*const std.builtin.StackTrace) ?*std.builtin.StackTrace {
+        \\    if (trace) |stack_trace| {
+        \\        return copyTraceErrorFailable(allocator, stack_trace) catch null;
+        \\    }
+        \\    return null;
+        \\}
         \\
         \\
         \\fn hasDeinit(comptime T: type) bool {

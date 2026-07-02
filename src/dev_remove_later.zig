@@ -21,7 +21,12 @@ fn unwrapTypeRes(comptime T: type) type {
 fn unwrapResult(result: anytype) unwrapTypeRes(@TypeOf(result)) {
     switch (result) {
         .ok => |ok| return ok,
-        .err => |err| std.process.fatal("{s} ({d})", .{ err.message, err.code }),
+        .err => |err| {
+            if (err.error_trace) |trace| {
+                std.debug.dumpErrorReturnTrace(trace);
+            }
+            std.process.fatal("{s} ({d})", .{ err.message, err.code });
+        },
     }
 }
 
