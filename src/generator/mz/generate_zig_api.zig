@@ -114,6 +114,7 @@ fn runtimeBridgeArgExprOwned(allocator: std.mem.Allocator, schema: *const Parser
         },
         .list => |child| blk: {
             const inner = try runtimeBridgeListTypeOwned(allocator, schema, child, true);
+
             defer allocator.free(inner);
             break :blk try std.fmt.allocPrint(allocator, "runtime_bridge.ConstList({s}){{ .slice = {s} }}", .{ inner, expr });
         },
@@ -122,6 +123,7 @@ fn runtimeBridgeArgExprOwned(allocator: std.mem.Allocator, schema: *const Parser
             .builtin_string => try std.fmt.allocPrint(allocator, "runtime_bridge.ConstString{{ .slice = {s} }}", .{expr}),
             .builtin_bytes => try std.fmt.allocPrint(allocator, "runtime_bridge.ConstBytes{{ .slice = {s} }}", .{expr}),
             .builtin_time => try std.fmt.allocPrint(allocator, "@as(u64, @intCast({s}.nanoseconds))", .{expr}),
+            .builtin_peer => try std.fmt.allocPrint(allocator, "{s}.peer", .{expr}),
             .struct_decl, .union_decl, .opaque_decl => try std.fmt.allocPrint(allocator, "runtime_bridge.{s}{{ .value = {s} }}", .{ name, expr }),
             else => allocator.dupe(u8, expr),
         },
@@ -147,6 +149,8 @@ fn runtimeBridgeListTypeOwned(allocator: std.mem.Allocator, schema: *const Parse
             .builtin_i32 => allocator.dupe(u8, "i32"),
             .builtin_i64 => allocator.dupe(u8, "i64"),
             .builtin_time => allocator.dupe(u8, "u64"),
+            .builtin_peer => allocator.dupe(u8, "i53"),
+
             else => allocator.dupe(u8, name),
         },
         else => allocator.dupe(u8, "void"),
@@ -167,6 +171,7 @@ fn runtimeBridgeResultExprOwned(allocator: std.mem.Allocator, schema: *const Par
             .builtin_void => allocator.dupe(u8, expr),
             .builtin_string, .builtin_bytes => try std.fmt.allocPrint(allocator, "{s}.slice", .{expr}),
             .builtin_time => try std.fmt.allocPrint(allocator, ".{{ .nanoseconds = @as(i128, @intCast({s})) }}", .{expr}),
+            .builtin_peer => try std.fmt.allocPrint(allocator, "{s}.peer", .{expr}),
             .struct_decl, .union_decl, .opaque_decl => try std.fmt.allocPrint(allocator, "{s}.value", .{expr}),
             else => allocator.dupe(u8, expr),
         },
@@ -682,6 +687,14 @@ pub fn emit(allocator: std.mem.Allocator, writer: *std.Io.Writer, schema: *const
         \\        else => {},
         \\    }
         \\}
+        \\
+        \\pub const Peer = struct {
+        \\    peer: i53,
+        \\
+        \\    pub fn init() Peer {
+        \\        return .{ .peer = 0 };
+        \\    }
+        \\};
         \\
     );
 

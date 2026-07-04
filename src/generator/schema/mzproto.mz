@@ -3,9 +3,9 @@
 // The storage backend to use for storing data.
 StorageBackend: enum {
     // Saves the authentication keys on a binary file, while everything else is saved in memory
-    //
-    // Warning: asdasdadsadasdsadasdas
     MemoryDcBinStorage = 0,
+    // Persists authorization, update cursors, peers, and pending updates.
+    SQLiteStorage = 1,
 }
 
 // The configuration for mzproto
@@ -72,7 +72,23 @@ TestSub2: struct {
 }
 
 Message: struct {
-    id: u64,
+    id: i53,
+    peer: peer,
+    sender: ?peer,
+    date: time,
+    outgoing: bool,
+    text: string,
+}
+
+UpdateNewMessage: struct {
+    message: Message,
+}
+UpdateEditMessage: struct {
+    message: Message,
+}
+UpdateDeleteMessages: struct {
+    channel: ?peer,
+    message_ids: list u32,
 }
 
 TestUnion: union {
@@ -101,10 +117,14 @@ UpdateClientStatus: struct {
 
 Update: union {
     UpdateClientStatus: UpdateClientStatus,
+    UpdateNewMessage: UpdateNewMessage,
+    UpdateEditMessage: UpdateEditMessage,
+    UpdateDeleteMessages: UpdateDeleteMessages,
 }
 
 // Get the next update from the client's queue.
 // If `blocking` is set to true, the function will wait until an update is received.
+// Updates are transient notifications and aren't replayed after a client restart.
 nextUpdate: func(blocking: bool): ?Update
 
 // Authenticate using a bot token.

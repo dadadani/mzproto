@@ -11,7 +11,7 @@ pub fn findLayer(io: std.Io, filename: []const u8) !?i32 {
     const file = try std.Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_only });
     defer file.close(io);
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
 
     var reader = file.reader(io, &buffer);
 

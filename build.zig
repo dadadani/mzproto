@@ -218,9 +218,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    _ = sqlite;
-
-    const enable_sqlite = b.option(bool, "enable-sqlite", "Whether the sqlite storage backend should be enabled or not (default: true)") orelse false;
+    const enable_sqlite = b.option(bool, "enable-sqlite", "Whether the sqlite storage backend should be enabled or not (default: true)") orelse true;
 
     const target_lang = b.option(TargetLanguage, "target-language", "Select the language that mzproto should target (default: zig)") orelse TargetLanguage.zig;
 
@@ -261,7 +259,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            //  .{ .name = "sqlite", .module = sqlite.module("sqlite") },
+            .{ .name = "sqlite", .module = sqlite.module("sqlite") },
             .{ .name = "mzproto_options", .module = options_module },
             .{ .name = "tl_base", .module = tl_base },
             .{ .name = "tl", .module = tl },
@@ -272,6 +270,8 @@ pub fn build(b: *std.Build) void {
     internal_api.addCSourceFile(.{
         .file = b.path("./src/lib/crypto/pq.c"),
     });
+    if (enable_sqlite)
+        bridge.addImport("sqlite", sqlite.module("sqlite"));
 
     bridge.addImport("mzproto_internal", internal_api);
 

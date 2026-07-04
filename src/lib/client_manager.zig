@@ -7,6 +7,7 @@ const DcId = @import("./utils.zig").DcId;
 const detectMigrateError = @import("./utils.zig").detectMigrateError;
 const Storage = @import("./storage.zig").Storage;
 const tl = @import("tl");
+const UpdatesQueue = @import("./updates_queue.zig");
 const UpdatesManager = @import("./updates_manager.zig");
 const bapi = @import("mzproto_bridge");
 const clientStatusToUpdate = @import("./api/helpers/updates.zig").clientStatusToUpdate;
@@ -61,12 +62,16 @@ internal: struct {
     authorization_check_event: std.Io.Event = .unset,
 
     client_status: bapi.ClientStatus,
+
+    requesting_config: bool = false,
 },
 
 dispatcher: Dispatcher,
 transport_connector: TransportConnector,
 storage: Storage,
+updates_queue: UpdatesQueue,
 updates_manager: UpdatesManager,
+group: *std.Io.Group,
 
 /// the lock is assumed to be already acquired (write)
 fn pushClientStatusInternal(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, status: bapi.ClientStatus) void {
@@ -78,7 +83,7 @@ fn pushClientStatusInternal(self: *ClientManager, allocator: std.mem.Allocator, 
             break :blk;
         };
 
-        self.updates_manager.updates_queue.putOne(io, update) catch |err| {
+        self.updates_queue.updates_queue.putOne(io, update) catch |err| {
             update.deinit(allocator);
             log.warn("Failed to put UpdateClientStatus.{s} to queue: {s}", .{ @tagName(status), @errorName(err) });
         };
@@ -106,7 +111,7 @@ pub fn pushClientStatus(self: *ClientManager, allocator: std.mem.Allocator, io: 
 
         std.log.debug("putting one...", .{});
 
-        self.updates_manager.updates_queue.putOne(io, update) catch |err| {
+        self.updates_queue.updates_queue.putOne(io, update) catch |err| {
             update.deinit(allocator);
             log.warn("Failed to put UpdateClientStatus.{s} to queue: {s}", .{ @tagName(status), @errorName(err) });
         };
@@ -115,7 +120,7 @@ pub fn pushClientStatus(self: *ClientManager, allocator: std.mem.Allocator, io: 
 }
 
 pub fn importConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
-    try self.transport_connector.importConfig(allocator, io, config);
+    try self.transport_connector.importDcOptions(allocator, io, config.dc_options, config.test_mode);
     {
         try self.internal.lock.lock(io);
         defer {
@@ -246,6 +251,13 @@ fn authenticateInternal(self: *ClientManager, allocator: std.mem.Allocator, io: 
     return .{ .ok = {} };
 }
 
+pub fn processMessage(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message: tl.ProtoMessage) void {
+    self.updates_manager.pushTLMessage(allocator, io, dc, message) catch |err| {
+        // TODO: maybe handle errors better
+        log.warn("Failed to push update to the update manager: {s}", .{@errorName(err)});
+    };
+}
+
 pub fn authenticateBot(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, token: []const u8) !bapi.Result(void) {
     const testmode = blk: {
         log.debug("locking authenticateBot...", .{});
@@ -279,6 +291,48 @@ pub fn authenticateBot(self: *ClientManager, allocator: std.mem.Allocator, io: s
     return self.authenticateInternal(allocator, io, token, testmode);
 }
 
+fn getConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
+    const dc = d: {
+        try self.internal.lock.lockShared(io);
+        defer self.internal.lock.unlockShared(io);
+
+        if (self.internal.target_dc != null) {
+            // avoid making weird things happen. connecting to a new session will request the config anyway
+            return;
+        }
+
+        break :d self.internal.current_dc;
+    };
+    const des = self.dispatcher.send(allocator, io, dc, .common, .{ .HelpGetConfig = &.{} }) catch |err| {
+        std.log.warn("Failed to request config: {s}", .{@errorName(err)});
+        return;
+    };
+    defer des.deinit(allocator);
+
+    if (des.data == .ProtoRpcError) {
+        std.log.warn("Failed to request config: ({d}) {s}", .{ des.data.ProtoRpcError.error_code, des.data.ProtoRpcError.error_message });
+        return;
+    }
+
+    self.importConfig(allocator, io, des.data.Config) catch |err| {
+        std.log.warn("Failed to import config: {s}", .{@errorName(err)});
+        return;
+    };
+}
+
+pub fn requestGetConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io) std.Io.Cancelable!void {
+    {
+        try self.internal.lock.lock(io);
+        defer self.internal.lock.unlock(io);
+        if (self.internal.requesting_config) {
+            return;
+        }
+        self.internal.requesting_config = true;
+    }
+
+    self.group.async(io, ClientManager.getConfig, .{ self, allocator, io });
+}
+
 pub fn deinit(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, comptime graceful: bool) void {
     log.debug("deinit session info", .{});
 
@@ -296,6 +350,7 @@ pub fn deinit(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, co
         log.debug("updates manager deinit", .{});
 
         self.updates_manager.deinit(allocator, io);
+        self.updates_queue.deinit(allocator, io);
         log.debug("storage deinit", .{});
 
         self.storage.deinit(allocator, io);

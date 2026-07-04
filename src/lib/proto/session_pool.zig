@@ -43,7 +43,7 @@ fn maybeScaleUpLocked(self: *SessionPool, allocator: std.mem.Allocator, io: std.
 
     const now = std.Io.Clock.now(.boot, io);
     if (self.last_autoscale_up) |last_up| {
-        const cooldown_end = last_up.addDuration(.fromSeconds(AUTOSCALE_SCALE_UP_COOLDOWN_SECONDS) );
+        const cooldown_end = last_up.addDuration(.fromSeconds(AUTOSCALE_SCALE_UP_COOLDOWN_SECONDS));
         if (cooldown_end.withClock(.boot).compare(.gt, now.withClock(.boot))) {
             return;
         }
@@ -149,40 +149,62 @@ pub fn check(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io) !void
     }
 }
 
-/// Sends a message to the least busy session in the pool
-pub fn send(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.TL) !Deserialized {
-    const session = blk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+pub const MessageMode = enum {
+    default,
+    nowait,
+};
 
-        if (self.pool.items.len <= 0) {
-            log.debug("No active sessions for this pool, creating one", .{});
-            std.debug.assert(self.min_sessions > 0);
+fn SendFn(comptime message_mode: MessageMode) type {
+    return struct {
+        pub inline fn send(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.TL) !if (message_mode == .default) Deserialized else void {
+            const session = blk: {
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
 
-            try self.pool.ensureUnusedCapacity(allocator, 0);
-            const session, const future = try self.createSession(allocator, io);
-            self.pool.appendAssumeCapacity(.{ session, future, std.Io.Clock.now(.boot, io) });
-            break :blk session;
-        }
+                if (self.pool.items.len <= 0) {
+                    log.debug("No active sessions for this pool, creating one", .{});
+                    std.debug.assert(self.min_sessions > 0);
 
-        try self.maybeScaleUpLocked(allocator, io);
+                    try self.pool.ensureUnusedCapacity(allocator, 0);
+                    const session, const future = try self.createSession(allocator, io);
+                    self.pool.appendAssumeCapacity(.{ session, future, std.Io.Clock.now(.boot, io) });
+                    break :blk session;
+                }
 
-        var match: ?*struct { *Session, *std.Io.Future(std.Io.Cancelable!void), std.Io.Timestamp } = null;
-        var num_requests: u32 = std.math.maxInt(u32);
-        for (self.pool.items) |*item| {
-            const check_requests = item[0].pending_requests.load(.acquire);
-            if (check_requests < num_requests) {
-                match = item;
-                num_requests = check_requests;
+                try self.maybeScaleUpLocked(allocator, io);
+
+                var match: ?*struct { *Session, *std.Io.Future(std.Io.Cancelable!void), std.Io.Timestamp } = null;
+                var num_requests: u32 = std.math.maxInt(u32);
+                for (self.pool.items) |*item| {
+                    const check_requests = item[0].pending_requests.load(.acquire);
+                    if (check_requests < num_requests) {
+                        match = item;
+                        num_requests = check_requests;
+                    }
+                }
+
+                match.?[2] = std.Io.Clock.now(.boot, io);
+
+                break :blk match.?[0];
+            };
+
+            if (message_mode == .default) {
+                return session.send(io, allocator, message, null, false);
+            } else {
+                return session.sendNoWait(io, allocator, message, null, false);
             }
         }
-
-        match.?[2] = std.Io.Clock.now(.boot, io);
-
-        break :blk match.?[0];
     };
+}
 
-    return session.send(io, allocator, message, null, false);
+/// Sends a message to the least busy session in the pool
+pub fn send(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.TL) !Deserialized {
+    return SendFn(.default).send(self, allocator, io, message);
+}
+
+/// Sends a message to the least busy session in the pool without waiting for the result
+pub fn sendNoWait(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.TL) !void {
+    return SendFn(.nowait).send(self, allocator, io, message);
 }
 
 pub fn deinit(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, graceful: bool) void {

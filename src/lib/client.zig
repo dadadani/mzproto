@@ -9,6 +9,7 @@ const AuthKey = @import("./proto/auth_key.zig");
 const Session = @import("./proto/session.zig");
 const utils = @import("./utils.zig");
 const TransportConnector = @import("./transport_connector.zig");
+const UpdatesManager = @import("./updates_manager.zig");
 const bapi = @import("mzproto_bridge");
 
 const log = std.log.scoped(.mzproto_client);
@@ -36,6 +37,7 @@ pub const Config = struct {
 fn storageBackend(orig: bapi.StorageBackend) Storage.Enum {
     return switch (orig) {
         .memory_dc_bin_storage => Storage.Enum.MemoryDcBinStorage,
+        .sq_lite_storage => Storage.Enum.SqliteStorage,
     };
 }
 
@@ -200,8 +202,10 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
             .target_dc = dc_switch_when_ready,
             .switch_dc_event = if (dc_switch_when_ready == null) .is_set else .unset,
             .client_status = .starting,
-        }, .dispatcher = undefined, .storage = storage, .transport_connector = connector, .updates_manager = undefined },
+        }, .dispatcher = undefined, .storage = storage, .transport_connector = connector, .updates_queue = undefined, .updates_manager = undefined, .group = undefined },
     };
+
+    self.client_manager.group = &self.group;
 
     self.client_manager.dispatcher = .{
         .client_manager = &self.client_manager,
@@ -210,12 +214,16 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: bapi.ConstRefConfi
         .storage = &self.client_manager.storage,
     };
 
-    self.client_manager.updates_manager.init();
+    self.client_manager.updates_queue.init();
+    self.client_manager.updates_manager.init(&self.client_manager);
+
+    self.client_manager.updates_manager = .{ .ingress_buffer = undefined, .client_manager = &self.client_manager, .ingress = .init(&self.client_manager.updates_manager.ingress_buffer) };
 
     log.debug("initalizing worker group", .{});
 
     try self.group.concurrent(io, backgroundInit, .{ self, allocator, io, stored_auth_key });
     try self.group.concurrent(io, checkWorker, .{ self, allocator, io });
+    try self.group.concurrent(io, UpdatesManager.worker, .{ &self.client_manager.updates_manager, allocator, io });
     return self;
 }
 

@@ -923,9 +923,7 @@ fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
             .ProtoMsgsAllInfo => try self.handleMsgsAllInfo(allocator, io, message),
             .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
             .ProtoMsgsStateInfo => try self.handleStateInfo(allocator, io, message),
-            else => {
-                // TODO: send to client manager
-            },
+            else => self.client_manager.processMessage(allocator, io, self.dc, message),
         }
 
         // if the seqno is odd, then it needs to be acknowledged
@@ -1317,7 +1315,6 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
                 log.warn("{f} failed to import tl.Config: {}", .{ self.dc, err });
             };
         }
-        // TODO: use the config to load things like available datacenters
     }
     {
         try self.mutex.lock(io);

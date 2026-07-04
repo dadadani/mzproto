@@ -1,7 +1,7 @@
 const std = @import("std");
 const bapi = @import("mzproto_bridge");
 const Client = @import("../../client.zig");
-const UpdatesManager = @import("../../updates_manager.zig");
+const UpdatesManager = @import("../../updates_queue.zig");
 
 pub fn authenticateBot(client_ptr: *anyopaque, input_token: bapi.ConstString) !bapi.Result(void) {
     const self: *Client = @ptrCast(@alignCast(client_ptr));

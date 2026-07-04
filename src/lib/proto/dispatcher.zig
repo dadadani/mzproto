@@ -95,36 +95,53 @@ pub fn ignite(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io) !void
         self.map.putAssumeCapacity(self.main_dc, pools);
     }
 }
-/// Sends a message to the given DC.
-pub fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !Deserialized {
-    const pool = blk: {
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
 
-        if (self.map.get(dc)) |pools| {
-            switch (message_type) {
-                .common => break :blk &pools.main,
-                .media => break :blk &pools.media,
-            }
-        } else {
-            try self.map.ensureUnusedCapacity(allocator, 1);
-            const pools = try self.createPools(allocator, io, dc);
-            errdefer pools.deinit(allocator, io, false);
-            // TODO: implement tmp_sessions support
-            try pools.main.setMaxSessions(io, 1);
-            try pools.main.setMinSessions(allocator, io, if (self.main_dc == dc) 1 else 0);
+fn SendFn(comptime message_mode: SessionPool.MessageMode) type {
+    return struct {
+        pub inline fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !if (message_mode == .default) Deserialized else void {
+            const pool = blk: {
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
 
-            try pools.media.setMaxSessions(io, 5);
-            try pools.media.setMinSessions(allocator, io, 0);
-            self.map.putAssumeCapacity(dc, pools);
-            switch (message_type) {
-                .common => break :blk &pools.main,
-                .media => break :blk &pools.media,
+                if (self.map.get(dc)) |pools| {
+                    switch (message_type) {
+                        .common => break :blk &pools.main,
+                        .media => break :blk &pools.media,
+                    }
+                } else {
+                    try self.map.ensureUnusedCapacity(allocator, 1);
+                    const pools = try self.createPools(allocator, io, dc);
+                    errdefer pools.deinit(allocator, io, false);
+                    // TODO: implement tmp_sessions support
+                    try pools.main.setMaxSessions(io, 1);
+                    try pools.main.setMinSessions(allocator, io, if (self.main_dc == dc) 1 else 0);
+
+                    try pools.media.setMaxSessions(io, 5);
+                    try pools.media.setMinSessions(allocator, io, 0);
+                    self.map.putAssumeCapacity(dc, pools);
+                    switch (message_type) {
+                        .common => break :blk &pools.main,
+                        .media => break :blk &pools.media,
+                    }
+                }
+            };
+            if (message_mode == .default) {
+                return pool.send(allocator, io, message);
+            } else {
+                return pool.sendNoWait(allocator, io, message);
             }
         }
     };
+}
 
-    return pool.send(allocator, io, message);
+/// Sends a message to the given DC.
+pub fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !Deserialized {
+    return SendFn(.default).send(self, allocator, io, dc, message_type, message);
+}
+
+/// Sends a message to the given DC without waiting for the result.
+pub fn sendNoWait(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !void {
+    return SendFn(.nowait).send(self, allocator, io, dc, message_type, message);
 }
 
 pub fn setMainDc(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId) !void {

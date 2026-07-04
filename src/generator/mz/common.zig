@@ -6,8 +6,11 @@ pub const DeclKind = enum {
     builtin_bool,
     builtin_u32,
     builtin_u64,
+    builtin_peer,
     builtin_i32,
     builtin_i64,
+    builtin_u53,
+    builtin_i53,
     builtin_time,
     builtin_string,
     builtin_bytes,
@@ -27,6 +30,9 @@ pub const ListFamily = enum {
     i32,
     i64,
     time,
+    peer,
+    u53,
+    i53,
 };
 
 pub fn classifyNamed(schema: *const Parser.Schema, name: []const u8) DeclKind {
@@ -34,11 +40,14 @@ pub fn classifyNamed(schema: *const Parser.Schema, name: []const u8) DeclKind {
     if (std.mem.eql(u8, name, "bool")) return .builtin_bool;
     if (std.mem.eql(u8, name, "u32")) return .builtin_u32;
     if (std.mem.eql(u8, name, "u64")) return .builtin_u64;
+    if (std.mem.eql(u8, name, "u53")) return .builtin_u53;
     if (std.mem.eql(u8, name, "i32")) return .builtin_i32;
     if (std.mem.eql(u8, name, "i64")) return .builtin_i64;
+    if (std.mem.eql(u8, name, "i53")) return .builtin_i53;
     if (std.mem.eql(u8, name, "time")) return .builtin_time;
     if (std.mem.eql(u8, name, "string")) return .builtin_string;
     if (std.mem.eql(u8, name, "bytes")) return .builtin_bytes;
+    if (std.mem.eql(u8, name, "peer")) return .builtin_peer;
 
     for (schema.declarations.items) |declaration| {
         switch (declaration) {
@@ -167,6 +176,9 @@ pub fn zigTypeOwned(allocator: std.mem.Allocator, schema: *const Parser.Schema, 
             .builtin_u64 => return allocator.dupe(u8, "u64"),
             .builtin_i32 => return allocator.dupe(u8, "i32"),
             .builtin_i64 => return allocator.dupe(u8, "i64"),
+            .builtin_i53 => return allocator.dupe(u8, "i53"),
+            .builtin_u53 => return allocator.dupe(u8, "u53"),
+            .builtin_peer => return allocator.dupe(u8, "Peer"),
             .builtin_time => return allocator.dupe(u8, "Time"),
             .builtin_string => return allocator.dupe(u8, "String"),
             .builtin_bytes => return allocator.dupe(u8, "Bytes"),
@@ -335,6 +347,9 @@ pub fn listFamily(schema: *const Parser.Schema, type_expr: *const Parser.TypeExp
             .builtin_i32 => .i32,
             .builtin_i64 => .i64,
             .builtin_time => .time,
+            .builtin_i53 => .i53,
+            .builtin_u53 => .u53,
+            .builtin_peer => .peer,
             else => .handle,
         },
     };

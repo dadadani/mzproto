@@ -126,11 +126,11 @@ pub inline fn isAvailable(self: *TransportConnector, io: std.Io, dc_id: utils.Dc
     return self.dc_address_map.contains(dc_id);
 }
 
-pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
+pub fn importDcOptions(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, dc_options: []const tl.IDcOption, test_mode: bool) !void {
     try self.lock.lock(io);
     defer self.lock.unlock(io);
 
-    check: for (config.dc_options) |idc_option| {
+    check: for (dc_options) |idc_option| {
         const dc_option = idc_option.DcOption;
 
         // TODO: add support for obfuscated connections
@@ -150,7 +150,7 @@ pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io:
             .id = @intCast(dc_option.id),
             .cdn = dc_option.cdn,
             .media = dc_option.media_only,
-            .testmode = config.test_mode,
+            .testmode = test_mode,
         });
 
         if (!dc_addr_list.found_existing) {

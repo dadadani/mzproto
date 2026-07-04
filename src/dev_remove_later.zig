@@ -42,6 +42,7 @@ fn updatesLoop(allocator: std.mem.Allocator, client: *mzproto.Client) !void {
                     unwrapResult(client.authenticateBot(info.bot_token));
                 }
             },
+            else => {},
         }
         std.log.info("{any}", .{update});
     }
