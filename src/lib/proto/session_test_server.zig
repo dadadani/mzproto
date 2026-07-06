@@ -165,9 +165,12 @@ pub fn sendRpcResultContainer(self: *SessionTestServer, allocator: std.mem.Alloc
     try self.sendServerContainer(allocator, io, message_id, messages);
 }
 
+const FixAllocator = @import("../allocator_fix.zig");
+
 test "receives client packet and sends server packet" {
     const dummyTransport = @import("../transport_connector.zig").dummyTransport;
-    const allocator = std.testing.allocator;
+    var fixa = FixAllocator.init(std.testing.allocator);
+    const allocator = fixa.allocator();
     const io = std.testing.io;
 
     var auth_key: [256]u8 = undefined;

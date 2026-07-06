@@ -2466,6 +2466,7 @@ pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key
     std.crypto.hash.Sha1.hash(self.perm_auth_key, &auth_key_id, .{});
     @memcpy(&self.perm_auth_key_id, auth_key_id[12..20]);
 }
+const FixAllocator = @import("../allocator_fix.zig");
 
 test "message state flags do not change the base state" {
     const all_flags = 8 | 16 | 32 | 64 | 128;
@@ -2476,7 +2477,8 @@ test "message state flags do not change the base state" {
 
 test "processBatch emits decryptable client packet" {
     const SessionTestServer = @import("./session_test_server.zig");
-    const allocator = std.testing.allocator;
+    var fixa = FixAllocator.init(std.testing.allocator);
+    const allocator = fixa.allocator();
     const io = std.testing.io;
 
     var perm_auth_key: [256]u8 = undefined;
@@ -2540,7 +2542,8 @@ test "processBatch emits decryptable client packet" {
 
 test "send resolves rpc_result through reader and writer workers" {
     const SessionTestServer = @import("./session_test_server.zig");
-    const allocator = std.testing.allocator;
+    var fixa = FixAllocator.init(std.testing.allocator);
+    const allocator = fixa.allocator();
     const io = std.testing.io;
 
     var perm_auth_key: [256]u8 = undefined;
@@ -2632,7 +2635,8 @@ test "send resolves rpc_result through reader and writer workers" {
 
 test "concurrent rpc queries" {
     const SessionTestServer = @import("./session_test_server.zig");
-    const allocator = std.testing.allocator;
+    var fixa = FixAllocator.init(std.testing.allocator);
+    const allocator = fixa.allocator();
     const io = std.testing.io;
     const request_count = 4;
 
