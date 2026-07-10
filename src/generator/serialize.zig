@@ -24,6 +24,66 @@ pub fn generateConstructorSerializeSize(allocator: std.mem.Allocator, constructo
         \\
     , .{});
 
+    // sometimes, some fields share the same index, meaning that they must ALL be specified. In this case, leaving one set to null is illegal
+    {
+        var flag_ix_usage: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .empty;
+        defer {
+            var it = flag_ix_usage.iterator();
+            while (it.next()) |list| {
+                list.value_ptr.deinit(allocator);
+            }
+            flag_ix_usage.deinit(allocator);
+        }
+
+        for (constructor.params.items) |param| {
+            switch (param.type.?) {
+                .Normal => |nrm| {
+                    if (std.mem.eql(u8, nrm.type.name, "true")) {
+                        continue;
+                    }
+
+                    if (nrm.flag) |flag| {
+                        const ix_usage = try flag_ix_usage.getOrPut(allocator, flag.index);
+                        if (!ix_usage.found_existing) {
+                            ix_usage.value_ptr.* = .empty;
+                        }
+                        try ix_usage.value_ptr.append(allocator, utils.safeStrParam(param.name));
+                    }
+                },
+                else => {},
+            }
+        }
+
+        var it = flag_ix_usage.iterator();
+        while (it.next()) |list| {
+            if (list.value_ptr.items.len <= 1) continue;
+            try writer.print(
+                \\        std.debug.assert((
+            , .{});
+
+            for (list.value_ptr.items, 0..) |name, i| {
+                try writer.print(
+                    \\self.{s} == null{s}
+                , .{ name, if (i < list.value_ptr.items.len - 1) " and " else "" });
+            }
+
+            try writer.print(
+                \\) or (
+            , .{});
+
+            for (list.value_ptr.items, 0..) |name, i| {
+                try writer.print(
+                    \\self.{s} != null{s}
+                , .{ name, if (i < list.value_ptr.items.len - 1) " and " else "" });
+            }
+
+            try writer.print(
+                \\));
+                \\
+            , .{});
+        }
+    }
+
     var self_used = false;
 
     for (constructor.params.items) |param| {
@@ -158,6 +218,66 @@ pub fn generateConstructorSerialize(allocator: std.mem.Allocator, constructor: c
         \\
     , .{});
 
+    // sometimes, some fields share the same index, meaning that they must ALL be specified. In this case, leaving one set to null is illegal
+    {
+        var flag_ix_usage: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .empty;
+        defer {
+            var it = flag_ix_usage.iterator();
+            while (it.next()) |list| {
+                list.value_ptr.deinit(allocator);
+            }
+            flag_ix_usage.deinit(allocator);
+        }
+
+        for (constructor.params.items) |param| {
+            switch (param.type.?) {
+                .Normal => |nrm| {
+                    if (std.mem.eql(u8, nrm.type.name, "true")) {
+                        continue;
+                    }
+
+                    if (nrm.flag) |flag| {
+                        const ix_usage = try flag_ix_usage.getOrPut(allocator, flag.index);
+                        if (!ix_usage.found_existing) {
+                            ix_usage.value_ptr.* = .empty;
+                        }
+                        try ix_usage.value_ptr.append(allocator, utils.safeStrParam(param.name));
+                    }
+                },
+                else => {},
+            }
+        }
+
+        var it = flag_ix_usage.iterator();
+        while (it.next()) |list| {
+            if (list.value_ptr.items.len <= 1) continue;
+            try writer.print(
+                \\        std.debug.assert((
+            , .{});
+
+            for (list.value_ptr.items, 0..) |name, i| {
+                try writer.print(
+                    \\self.{s} == null{s}
+                , .{ name, if (i < list.value_ptr.items.len - 1) " and " else "" });
+            }
+
+            try writer.print(
+                \\) or (
+            , .{});
+
+            for (list.value_ptr.items, 0..) |name, i| {
+                try writer.print(
+                    \\self.{s} != null{s}
+                , .{ name, if (i < list.value_ptr.items.len - 1) " and " else "" });
+            }
+
+            try writer.print(
+                \\));
+                \\
+            , .{});
+        }
+    }
+
     for (constructor.params.items) |param| {
         if (param.type_def) {
             @panic("TODO: type_def");
@@ -224,6 +344,7 @@ pub fn generateConstructorSerialize(allocator: std.mem.Allocator, constructor: c
                         \\        if ({s}) |opt_{s}| {{
                         \\
                     , .{ param_name, utils.safeStrParam(param.name) });
+
                     const new_param_name = try std.fmt.allocPrint(allocator, "opt_{s}", .{utils.safeStrParam(param.name)});
                     allocator.free(param_name);
                     param_name = new_param_name;
