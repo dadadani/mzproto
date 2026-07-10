@@ -29,7 +29,7 @@ jobs:
 
     - name: run tests
       shell: 'nix develop -c bash -e {0}'
-      run: zig build --summary all test
+      run: zig build --verbose --summary all test
     - name: build
       shell: 'nix develop -c bash -e {0}'
-      run: zig build --summary all
+      run: zig build --verbose --summary all
