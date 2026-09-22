@@ -9,7 +9,7 @@
 
     # Used for shell.nix
     flake-compat = {
-      url = github:edolstra/flake-compat;
+      url = "github:edolstra/flake-compat";
       flake = false;
     };
   };
