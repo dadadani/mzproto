@@ -276,6 +276,16 @@ pub fn build(b: *std.Build) void {
     bridge.addImport("mzproto_internal", internal_api);
 
     const test_step = b.step("test", "Run tests");
+    const tl2_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/generator/tl2/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_tl2_tests = b.addRunArtifact(tl2_tests);
+    b.step("test-tl2", "Run TL parser and compatibility tests").dependOn(&run_tl2_tests.step);
+    test_step.dependOn(&run_tl2_tests.step);
 
     // now, depending on the language that we want to target, we need to change some things...
     switch (target_lang) {
