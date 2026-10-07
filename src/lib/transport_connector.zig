@@ -126,12 +126,12 @@ pub inline fn isAvailable(self: *TransportConnector, io: std.Io, dc_id: utils.Dc
     return self.dc_address_map.contains(dc_id);
 }
 
-pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
+pub fn importConfig(self: *TransportConnector, allocator: std.mem.Allocator, io: std.Io, config: *const tl.config.Decoded) !void {
     try self.lock.lock(io);
     defer self.lock.unlock(io);
 
     check: for (config.dc_options) |idc_option| {
-        const dc_option = idc_option.DcOption;
+        const dc_option = idc_option.dcOption;
 
         // TODO: add support for obfuscated connections
         if (dc_option.tcpo_only) {

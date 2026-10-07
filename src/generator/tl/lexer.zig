@@ -31,14 +31,17 @@ pub fn tokenize(allocator: std.mem.Allocator, source: []const u8, diagnostic: *?
     errdefer tokens.deinit(allocator);
     var i: usize = 0;
     while (i < source.len) {
+
         if (std.ascii.isWhitespace(source[i])) {
             i += 1;
             continue;
         }
+
         if (std.mem.startsWith(u8, source[i..], "//")) {
             while (i < source.len and source[i] != '\n') : (i += 1) {}
             continue;
         }
+
         if (std.mem.startsWith(u8, source[i..], "/*")) {
             const start = i;
             const end = std.mem.indexOf(u8, source[i + 2 ..], "*/") orelse {
@@ -70,7 +73,7 @@ pub fn tokenize(allocator: std.mem.Allocator, source: []const u8, diagnostic: *?
             i += 1;
 
             break :blk switch (source[start]) {
-                '#' => .hash,
+                '#' => .hash, // flags?
                 ':' => .colon,
                 '.' => .dot,
                 '?' => .question,
@@ -83,7 +86,7 @@ pub fn tokenize(allocator: std.mem.Allocator, source: []const u8, diagnostic: *?
                 '<' => .langle,
                 '>' => .rangle,
                 ',' => .comma,
-                '%' => .percent,
+                '%' => .percent, // bare obj
                 '!' => .bang,
                 '@' => .at,
                 else => {

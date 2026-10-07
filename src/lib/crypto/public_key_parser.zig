@@ -2,7 +2,7 @@ const std = @import("std");
 
 const RSAPublicKey = @This();
 
-const serializeString = @import("tl_base").serializeString;
+const Serializer = @import("tl_base").cursor.Serializer;
 
 modulus: u2048,
 exponent: u64,
@@ -16,7 +16,9 @@ fn genFingerprint(self: *const RSAPublicKey) u64 {
     while (mod_start < modulus_bytes.len and modulus_bytes[mod_start] == 0) : (mod_start += 1) {}
     const mod_slice = modulus_bytes[mod_start..];
     var tl_modulus_bytes: [512]u8 = undefined;
-    const tl_modulus_bytes_size = serializeString(mod_slice, &tl_modulus_bytes);
+    var mod_writer = Serializer.init(&tl_modulus_bytes);
+    mod_writer.bytes(mod_slice, .telegram) catch unreachable;
+    const tl_modulus_bytes_size = mod_writer.out().len;
 
     var exponent_bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &exponent_bytes, self.exponent, .big);
@@ -26,7 +28,9 @@ fn genFingerprint(self: *const RSAPublicKey) u64 {
     const exp_slice = exponent_bytes[exp_start..];
 
     var tl_exponent_bytes: [16]u8 = undefined;
-    const tl_exponent_size = serializeString(exp_slice, &tl_exponent_bytes);
+    var exp_writer = Serializer.init(&tl_exponent_bytes);
+    exp_writer.bytes(exp_slice, .telegram) catch unreachable;
+    const tl_exponent_size = exp_writer.out().len;
 
     var digest = std.crypto.hash.Sha1.init(.{});
     digest.update(tl_modulus_bytes[0..tl_modulus_bytes_size]);

@@ -160,20 +160,19 @@ fn buildBridge(b: *std.Build, lang: TargetLanguage) std.Build.LazyPath {
     return bridge_path;
 }
 
-fn buildTl(b: *std.Build) std.Build.LazyPath {
-    const tl_generator = b.addExecutable(.{
-        .name = "generate_tl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("./src/generator/main.zig"),
-            .target = b.graph.host,
-        }),
-    });
+fn buildTLModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tlbase: *std.Build.Module, name: []const u8, generator: *std.Build.Step.Compile, dialect: enum { telegram, storage }, files: []const std.Build.LazyPath) *std.Build.Module {
+    const run = b.addRunArtifact(generator);
 
-    const tl_generator_step = b.addRunArtifact(tl_generator);
-    const tl_api_path = tl_generator_step.addOutputFileArg("tl_api.zig");
-    tl_generator_step.addFileArg(b.path("./src/generator/schema/api.tl"));
-    tl_generator_step.addFileArg(b.path("./src/generator/schema/mtproto.tl"));
-    return tl_api_path;
+    run.addArg(@tagName(dialect));
+    const out_path = run.addOutputFileArg2(b.fmt("tlgen_{s}.zig", .{name}), .{});
+    for (files) |path| run.addFileArg(path);
+
+    const module = b.addModule(name, .{ .root_source_file = out_path, .target = target, .optimize = optimize, .imports = &.{.{
+        .name = "tl_base",
+        .module = tlbase,
+    }} });
+
+    return module;
 }
 
 fn buildZigApi(b: *std.Build) std.Build.LazyPath {
@@ -228,21 +227,29 @@ pub fn build(b: *std.Build) void {
 
     const options_module = createMzprotoOptions(b, enable_sqlite, target_lang);
 
+    const tl_parser = b.addModule("tl_parser", .{
+        .root_source_file = b.path("./src/generator/tl/root.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+
     // First of all, we generate the tl api from the .tl scheme. This is the same for all languages we target.
     const tl_base = b.addModule("tl_base", .{
-        .root_source_file = b.path("./src/tl_base.zig"),
+        .root_source_file = b.path("./src/tlbase.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const tl = b.addModule("tl", .{
-        .root_source_file = buildTl(b),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "tl_base", .module = tl_base },
-        },
+    const tl_generator = b.addExecutable(.{
+        .name = "tl_generator",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("./src/generator/tlgen/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "tl_parser", .module = tl_parser }},
+        }),
     });
+
+    const tl = buildTLModule(b, target, optimize, tl_base, "tl", tl_generator, .telegram, &.{ b.path("./src/generator/schema/api.tl"), b.path("./src/generator/schema/mtproto.tl") });
 
     // The bridge api is an intermediary api that sits between zig and the target language,
     //  allowing us to mantain a single codebase for all the available methods
@@ -275,17 +282,77 @@ pub fn build(b: *std.Build) void {
 
     bridge.addImport("mzproto_internal", internal_api);
 
+    // Create tests
     const test_step = b.step("test", "Run tests");
-    const tl2_tests = b.addTest(.{
+
+    // tests related to the tl parser
+    const tlparser_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/generator/tl2/tests.zig"),
-            .target = target,
+            .root_source_file = b.path("src/generator/tl/tests.zig"),
+            .target = b.graph.host,
             .optimize = optimize,
         }),
     });
-    const run_tl2_tests = b.addRunArtifact(tl2_tests);
-    b.step("test-tl2", "Run TL parser and compatibility tests").dependOn(&run_tl2_tests.step);
-    test_step.dependOn(&run_tl2_tests.step);
+    const run_tlparser_tests = b.addRunArtifact(tlparser_tests);
+    test_step.dependOn(&run_tlparser_tests.step);
+
+    // tests related to the tl generator
+    const tlgen_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/generator/tlgen/generate_tests.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "tl_parser", .module = tl_parser }},
+        }),
+    });
+    const run_tlgen_tests = b.addRunArtifact(tlgen_tests);
+    test_step.dependOn(&run_tlgen_tests.step);
+
+    // tests related to generated tl modules
+    const tlmodules_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/generator/tlgen/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tl_base", .module = tl_base },
+                .{ .name = "tl", .module = tl },
+            },
+        }),
+    });
+    // tlgen/tests.zig depends on a few more generated tl files, so we add them first
+    tlmodules_tests.root_module.addImport("storage_v1", buildTLModule(
+        b,
+        target,
+        optimize,
+        tl_base,
+        "storage_v1",
+        tl_generator,
+        .storage,
+        &.{b.path("src/generator/tlgen/storage_v1.tl")},
+    ));
+    tlmodules_tests.root_module.addImport("storage", buildTLModule(
+        b,
+        target,
+        optimize,
+        tl_base,
+        "storage",
+        tl_generator,
+        .storage,
+        &.{b.path("src/generator/tlgen/storage.tl")},
+    ));
+    tlmodules_tests.root_module.addImport("telegram", buildTLModule(
+        b,
+        target,
+        optimize,
+        tl_base,
+        "telegram",
+        tl_generator,
+        .telegram,
+        &.{b.path("src/generator/tlgen/telegram.tl")},
+    ));
+    const run_tlmodules_tests = b.addRunArtifact(tlmodules_tests);
+    test_step.dependOn(&run_tlmodules_tests.step);
 
     // now, depending on the language that we want to target, we need to change some things...
     switch (target_lang) {

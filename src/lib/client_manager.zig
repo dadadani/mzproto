@@ -114,7 +114,7 @@ pub fn pushClientStatus(self: *ClientManager, allocator: std.mem.Allocator, io: 
     }
 }
 
-pub fn importConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, config: *const tl.Config) !void {
+pub fn importConfig(self: *ClientManager, allocator: std.mem.Allocator, io: std.Io, config: *const tl.config.Decoded) !void {
     try self.transport_connector.importConfig(allocator, io, config);
     {
         try self.internal.lock.lock(io);
@@ -161,12 +161,13 @@ pub fn probeLoggedIn(self: *ClientManager, allocator: std.mem.Allocator, io: std
         break :blk self.internal.current_dc;
     };
 
-    const des = try self.dispatcher.send(allocator, io, dc, .common, tl.TL{ .UsersGetUsers = &.{ .id = &.{.{ .InputUserSelf = &.{} }} } });
+    const des = try self.dispatcher.send(allocator, io, dc, .common, tl.AnyFunction{ .@"users.getUsers" = &.{ .id = &.{.{ .inputUserSelf = &.{} }} } });
     defer des.deinit(allocator);
-    if (des.data == .ProtoRpcError) {
+    if (des.data == .rpc_error) {
         return false;
     }
-    if (des.data == .Vector and des.data.Vector.len >= 1 and des.data.Vector[0] == .User) {
+    const users = try des.from(tl.@"users.getUsers");
+    if (users.len >= 1 and users[0] == .user) {
         std.log.debug("locking probeLoggedIn...", .{});
         try self.internal.lock.lock(io);
         defer {
@@ -174,7 +175,7 @@ pub fn probeLoggedIn(self: *ClientManager, allocator: std.mem.Allocator, io: std
             self.internal.lock.unlock(io);
         }
 
-        const user = des.data.Vector[0].User;
+        const user = users[0].user;
         self.internal.my_id = user.id;
         self.internal.is_bot = user.bot;
 
@@ -198,13 +199,13 @@ fn authenticateInternal(self: *ClientManager, allocator: std.mem.Allocator, io: 
             self.session_info.lock.unlockShared(io);
         }
 
-        const r = try self.dispatcher.send(allocator, io, self.internal.current_dc, .common, tl.TL{ .AuthImportBotAuthorization = &.{ .flags = 0, .api_id = self.session_info.api_id, .api_hash = self.session_info.api_hash, .bot_auth_token = token } });
+        const r = try self.dispatcher.send(allocator, io, self.internal.current_dc, .common, tl.AnyFunction{ .@"auth.importBotAuthorization" = &.{ .flags = 0, .api_id = self.session_info.api_id, .api_hash = self.session_info.api_hash, .bot_auth_token = token } });
         break :blk .{ r, self.internal.current_dc };
     };
     defer r.deinit(allocator);
 
-    if (r.data == .ProtoRpcError) {
-        const err = r.data.ProtoRpcError;
+    if (r.data == .rpc_error) {
+        const err = r.data.rpc_error;
         if (detectMigrateError(err.error_message)) |dc| {
             {
                 log.debug("locking authenticateInternal...", .{});
@@ -220,16 +221,17 @@ fn authenticateInternal(self: *ClientManager, allocator: std.mem.Allocator, io: 
         return .{ .err = .{ .code = err.error_code, .message = allocator.dupe(u8, err.error_message) catch "UNKNOWN_ERROR", .owned = true } };
     }
 
-    if (r.data == .AuthAuthorization) {
-        const authorization = r.data.AuthAuthorization;
-        if (authorization.user == .UserEmpty) {
+    const result = try r.from(tl.@"auth.importBotAuthorization");
+    if (result == .@"auth.authorization") {
+        const authorization = result.@"auth.authorization";
+        if (authorization.user == .userEmpty) {
             @branchHint(.unlikely);
             if (!try probeLoggedIn(self, allocator, io)) {
                 return .{ .err = .{ .code = 500, .message = "LOGIN_FAILED" } };
             }
         }
-        if (authorization.user == .User) {
-            const user = authorization.user.User;
+        if (authorization.user == .user) {
+            const user = authorization.user.user;
             log.debug("locking authenticateInternal...", .{});
             try self.internal.lock.lock(io);
             defer {

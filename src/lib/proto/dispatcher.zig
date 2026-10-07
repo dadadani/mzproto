@@ -8,7 +8,7 @@ const tl = @import("tl");
 const AuthKey = @import("./auth_key.zig");
 const log = std.log.scoped(.mzproto_dispatcher);
 const ClientManager = @import("../client_manager.zig");
-const Deserialized = @import("./utils.zig").Deserialized;
+const Response = @import("./utils.zig").Response;
 const SessionPools = struct {
     auth_key: [256]u8,
     main: SessionPool,
@@ -96,7 +96,7 @@ pub fn ignite(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io) !void
     }
 }
 /// Sends a message to the given DC.
-pub fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.TL) !Deserialized {
+pub fn send(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId, message_type: MessageType, message: tl.AnyFunction) !Response {
     const pool = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);

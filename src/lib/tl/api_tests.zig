@@ -1,408 +1,91 @@
 const std = @import("std");
 const api = @import("tl");
+const base = @import("tl_base");
+const utils = @import("../proto/utils.zig");
 
-test "basic constructor serialize & deserialize" {
+// Return a deep clone after freeing both the wire and the first decode workspace.
+fn roundTrip(comptime T: type, value: base.Ref(T, .boxed).Write) !utils.Owned(T) {
     const allocator = std.testing.allocator;
-    {
-        const constructor = api.TL{ .InputUserSelf = &api.InputUserSelf{} };
-
-        const dest = try allocator.alloc(u8, constructor.serializeSize());
-        defer allocator.free(dest);
-
-        const serialized = constructor.serialize(dest);
-
-        try std.testing.expectEqual(constructor.serializeSize(), serialized);
-
-        var size: usize = 0;
-        const deserialized_read_bytes = api.IInputUser.deserializeSize(dest, &size);
-        try std.testing.expectEqual(constructor.serializeSize(), deserialized_read_bytes);
-
-        const deserializeBuffer = try allocator.alloc(u8, size);
-        defer allocator.free(deserializeBuffer);
-
-        size = 0;
-
-        const deserializedx = api.IInputUser.deserialize(dest, deserializeBuffer);
-        const deserialized = deserializedx[0];
-
-        var writtenAgain: usize = 0;
-
-        deserialized.cloneSize(&writtenAgain);
-
-        const clone_dest = try allocator.alloc(u8, writtenAgain);
-        defer allocator.free(clone_dest);
-
-        const clone = deserialized.clone(clone_dest);
-
-        switch (deserialized) {
-            .InputUserSelf => {},
-            else => unreachable,
-        }
-
-        switch (clone[0]) {
-            .InputUserSelf => {},
-            else => unreachable,
-        }
-    }
+    const wire = try allocator.alloc(u8, try T.serializedSize(value));
+    defer allocator.free(wire);
+    const encoded = try T.serialize(value, wire);
+    try std.testing.expectEqual(wire.len, encoded.len);
+    const decoded = try utils.Owned(T).decode(allocator, encoded);
+    defer decoded.deinit(allocator);
+    const workspace = try allocator.alignedAlloc(u8, .fromByteUnits(T.out_alignment), try T.cloneSize(decoded.data));
+    errdefer allocator.free(workspace);
+    const clone = try T.cloneInto(decoded.data, workspace);
+    try std.testing.expectEqual(workspace.len, clone.object_bytes);
+    return .{ .ptr = workspace, .data = clone.value };
 }
 
-test "basic constructor with some fields serialize & deserialize" {
-    const allocator = std.testing.allocator;
-
-    {
-        var constructor = api.IInputFile{ .InputFile = &api.InputFile{ .id = 123, .parts = 59535612, .name = "namefieldhere", .md5_checksum = "itworks!!!!0AA" } };
-
-        const dest = try allocator.alloc(u8, constructor.serializeSize());
-        defer allocator.free(dest);
-
-        const serialized = constructor.serialize(dest);
-
-        try std.testing.expectEqual(constructor.serializeSize(), serialized);
-
-        var size: usize = 0;
-
-        const deserialized_read = api.IInputFile.deserializeSize(dest, &size);
-
-        try std.testing.expectEqual(constructor.serializeSize(), deserialized_read);
-
-        const deserializeBuffer = try allocator.alloc(u8, size);
-        defer allocator.free(deserializeBuffer);
-
-        const deserializedx = api.IInputFile.deserialize(dest, deserializeBuffer);
-        const deserialized = deserializedx[0];
-
-        try std.testing.expect(deserializedx[1] <= size);
-        try std.testing.expectEqual(constructor.serializeSize(), deserializedx[2]);
-
-        var sizeAgain: usize = 0;
-
-        deserialized.cloneSize(&sizeAgain);
-
-        try std.testing.expect(size >= sizeAgain);
-
-        switch (deserialized) {
-            .InputFile => {
-                const input_file = deserialized.InputFile;
-                try std.testing.expectEqual(123, input_file.id);
-                try std.testing.expectEqual(59535612, input_file.parts);
-                try std.testing.expectEqualStrings("namefieldhere", input_file.name);
-                try std.testing.expectEqualStrings("itworks!!!!0AA", input_file.md5_checksum);
-            },
-            else => unreachable,
-        }
-
-        const clonebuf = try allocator.alloc(u8, sizeAgain);
-        defer allocator.free(clonebuf);
-
-        const clone = deserialized.clone(clonebuf);
-
-        try std.testing.expect(size >= clone[1]);
-
-        switch (clone[0]) {
-            .InputFile => {
-                const input_file = clone[0].InputFile;
-                try std.testing.expectEqual(123, input_file.id);
-                try std.testing.expectEqual(59535612, input_file.parts);
-                try std.testing.expectEqualStrings("namefieldhere", input_file.name);
-                try std.testing.expectEqualStrings("itworks!!!!0AA", input_file.md5_checksum);
-            },
-            else => unreachable,
-        }
-    }
+test "basic constructor serialize decode and clone" {
+    const value = try roundTrip(api.InputUser, .{ .inputUserSelf = &.{} });
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expect(value.data == .inputUserSelf);
 }
 
-test "deserialize constructor with int vector" {
-    const allocator = std.testing.allocator;
+test "constructor strings survive decode and clone workspace release" {
+    const value = try roundTrip(api.InputFile, .{ .inputFile = &.{ .id = 123, .parts = 59535612, .name = "namefieldhere", .md5_checksum = "itworks!!!!0AA" } });
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expectEqual(123, value.data.inputFile.id);
+    try std.testing.expectEqual(59535612, value.data.inputFile.parts);
+    try std.testing.expectEqualStrings("namefieldhere", value.data.inputFile.name);
+    try std.testing.expectEqualStrings("itworks!!!!0AA", value.data.inputFile.md5_checksum);
+}
 
+test "decode existing constructor with int vector" {
     const data = [_]u8{ 60, 65, 92, 248, 191, 237, 60, 25, 0, 0, 0, 0, 21, 196, 181, 28, 3, 0, 0, 0, 128, 0, 0, 0, 128, 0, 0, 0, 0, 1, 0, 0 };
-
-    var size: usize = 0;
-
-    const deserialize_read = api.IVideoSize.deserializeSize(&data, &size);
-
-    try std.testing.expectEqual(data.len, deserialize_read);
-
-    const deserializeBuffer = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(deserializeBuffer);
-
-    const deserializedx = api.IVideoSize.deserialize(&data, deserializeBuffer);
-
-    try std.testing.expect(size >= deserializedx[1]);
-    try std.testing.expectEqual(data.len, deserializedx[2]);
-
-    const deserialized = deserializedx[0];
-
-    const serialize_size = deserialized.serializeSize();
-    try std.testing.expectEqual(serialize_size, data.len);
-
-    var writtenAgain: usize = 0;
-
-    deserialized.cloneSize(&writtenAgain);
-
-    try std.testing.expect(size >= writtenAgain);
-
-    switch (deserialized) {
-        .VideoSizeEmojiMarkup => {
-            const video_size = deserialized.VideoSizeEmojiMarkup;
-            try std.testing.expectEqual(423423423, video_size.emoji_id);
-            try std.testing.expectEqualSlices(u32, &[_]u32{ 128, 128, 256 }, video_size.background_colors);
-        },
-        else => unreachable,
-    }
-
-    const clone_bytes = try allocator.alloc(u8, writtenAgain);
-    defer allocator.free(clone_bytes);
-
-    const clone = deserialized.clone(clone_bytes);
-
-    try std.testing.expect(size >= clone[1]);
-
-    switch (clone[0]) {
-        .VideoSizeEmojiMarkup => {
-            const video_size = deserialized.VideoSizeEmojiMarkup;
-            try std.testing.expectEqual(423423423, video_size.emoji_id);
-            try std.testing.expectEqualSlices(u32, &[_]u32{ 128, 128, 256 }, video_size.background_colors);
-        },
-        else => unreachable,
-    }
+    const decoded = try utils.Owned(api.VideoSize).decode(std.testing.allocator, &data);
+    defer decoded.deinit(std.testing.allocator);
+    const value = decoded.data.videoSizeEmojiMarkup;
+    try std.testing.expectEqual(423423423, value.emoji_id);
+    try std.testing.expectEqualSlices(u32, &.{ 128, 128, 256 }, value.background_colors);
+    var encoded: [data.len]u8 = undefined;
+    const write: api.videoSizeEmojiMarkup = .{ .emoji_id = value.emoji_id, .background_colors = value.background_colors };
+    try std.testing.expectEqualSlices(u8, &data, try api.videoSizeEmojiMarkup.serialize(&write, &encoded));
 }
 
-test "big constructor serialize & deserialize" {
-    const allocator = std.testing.allocator;
-
-    const constructor = api.IMessage{ .Message = &api.Message{
+test "nested constructor flags and vectors survive cloning" {
+    const value = try roundTrip(api.message, &.{
         .id = 32,
         .message = "asdasd",
-        .restriction_reason = &[_]api.IRestrictionReason{api.IRestrictionReason{ .RestrictionReason = &api.RestrictionReason{ .platform = "platform", .text = "text", .reason = "reason" } }},
-        .peer_id = api.IPeer{ .PeerChannel = &api.PeerChannel{
-            .channel_id = 3543543,
-        } },
+        .restriction_reason = &.{.{ .restrictionReason = &.{ .platform = "platform", .text = "text", .reason = "reason" } }},
+        .peer_id = .{ .peerChannel = &.{ .channel_id = 3543543 } },
         .date = 342432432,
-    } };
-
-    var size = constructor.serializeSize();
-    const dest = try allocator.alloc(u8, size);
-    defer allocator.free(dest);
-
-    const serialized = constructor.serialize(dest);
-
-    try std.testing.expectEqual(serialized, size);
-
-    size = 0;
-
-    const deserialize_size = api.TL.deserializeSize(dest, &size);
-    try std.testing.expectEqual(constructor.serializeSize(), deserialize_size);
-
-    const deserializeBuffer = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(deserializeBuffer);
-
-    const deserializedx = api.TL.deserialize(dest, deserializeBuffer);
-    const deserialized = deserializedx[0];
-
-    try std.testing.expect(size >= deserializedx[1]);
-    try std.testing.expectEqual(constructor.serializeSize(), deserializedx[2]);
-
-    var size_again: usize = 0;
-
-    deserialized.cloneSize(&size_again);
-
-    try std.testing.expect(size >= size_again);
-
-    switch (deserialized) {
-        .Message => {
-            const message = deserialized.Message;
-
-            try std.testing.expectEqual(32, message.id);
-            try std.testing.expectEqualStrings("asdasd", message.message);
-            try std.testing.expectEqual(342432432, message.date);
-
-            try std.testing.expectEqual(1, message.restriction_reason.?.len);
-            switch (message.restriction_reason.?[0]) {
-                .RestrictionReason => {
-                    const restriction_reason = message.restriction_reason.?[0].RestrictionReason;
-                    try std.testing.expectEqualStrings("platform", restriction_reason.platform);
-                    try std.testing.expectEqualStrings("reason", restriction_reason.reason);
-                    try std.testing.expectEqualStrings("text", restriction_reason.text);
-                },
-            }
-
-            switch (message.peer_id) {
-                .PeerChannel => {
-                    const peer_channel = message.peer_id.PeerChannel;
-                    try std.testing.expectEqual(3543543, peer_channel.channel_id);
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
-
-    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
-    defer std.testing.allocator.free(clonebuf);
-
-    const clone = deserialized.clone(clonebuf);
-
-    try std.testing.expect(size >= clone[1]);
-
-    switch (clone[0]) {
-        .Message => {
-            const message = clone[0].Message;
-
-            try std.testing.expectEqual(32, message.id);
-            try std.testing.expectEqualStrings("asdasd", message.message);
-            try std.testing.expectEqual(342432432, message.date);
-
-            try std.testing.expectEqual(1, message.restriction_reason.?.len);
-            switch (message.restriction_reason.?[0]) {
-                .RestrictionReason => {
-                    const restriction_reason = message.restriction_reason.?[0].RestrictionReason;
-                    try std.testing.expectEqualStrings("platform", restriction_reason.platform);
-                    try std.testing.expectEqualStrings("reason", restriction_reason.reason);
-                    try std.testing.expectEqualStrings("text", restriction_reason.text);
-                },
-            }
-
-            switch (message.peer_id) {
-                .PeerChannel => {
-                    const peer_channel = message.peer_id.PeerChannel;
-                    try std.testing.expectEqual(3543543, peer_channel.channel_id);
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
+    });
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expectEqual(32, value.data.id);
+    try std.testing.expectEqualStrings("asdasd", value.data.message);
+    try std.testing.expectEqual(342432432, value.data.date);
+    const reasons = value.data.restriction_reason.?;
+    try std.testing.expectEqual(1, reasons.len);
+    try std.testing.expectEqualStrings("platform", reasons[0].restrictionReason.platform);
+    try std.testing.expectEqualStrings("reason", reasons[0].restrictionReason.reason);
+    try std.testing.expectEqualStrings("text", reasons[0].restrictionReason.text);
+    try std.testing.expectEqual(3543543, value.data.peer_id.peerChannel.channel_id);
 }
 
-test "Dynamic constructor" {
-    const constructor = api.TL{ .InvokeWithLayer = &api.InvokeWithLayer{ .layer = 149, .query = api.TL{ .InvokeWithTakeout = &api.InvokeWithTakeout{ .takeout_id = 45, .query = .{ .InputUserSelf = &api.InputUserSelf{} } } } } };
-
-    const sbuf = try std.testing.allocator.alloc(u8, constructor.serializeSize());
-    defer std.testing.allocator.free(sbuf);
-
-    const ser_size = constructor.serialize(sbuf);
-
-    try std.testing.expectEqual(sbuf.len, ser_size);
-
-    var size: usize = 0;
-
-    const deser_size = api.TL.deserializeSize(sbuf, &size);
-    try std.testing.expectEqual(ser_size, deser_size);
-
-    const dbuf = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(dbuf);
-
-    const deserializedx = api.TL.deserialize(sbuf, dbuf);
-
-    const deserialized = deserializedx[0];
-
-    try std.testing.expect(size >= deserializedx[1]);
-    try std.testing.expectEqual(ser_size, deserializedx[2]);
-
-    var size_again: usize = 0;
-
-    deserialized.cloneSize(&size_again);
-
-    try std.testing.expect(size >= size_again);
-
-    switch (deserialized) {
-        .InvokeWithLayer => |x| {
-            try std.testing.expectEqual(149, x.layer);
-
-            switch (x.query) {
-                .InvokeWithTakeout => |xx| {
-                    try std.testing.expectEqual(45, xx.takeout_id);
-                    switch (xx.query) {
-                        .InputUserSelf => {},
-                        else => unreachable,
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
-
-    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
-    defer std.testing.allocator.free(clonebuf);
-
-    const clone = deserialized.clone(clonebuf);
-
-    try std.testing.expect(size >= clone[1]);
-
-    switch (clone[0]) {
-        .InvokeWithLayer => |x| {
-            try std.testing.expectEqual(149, x.layer);
-
-            switch (x.query) {
-                .InvokeWithTakeout => |xx| {
-                    try std.testing.expectEqual(45, xx.takeout_id);
-                    switch (xx.query) {
-                        .InputUserSelf => {},
-                        else => unreachable,
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
+test "dynamic nested function wrappers preserve expected result codec" {
+    const request: api.AnyFunction = .{ .invokeWithLayer = &.{ .layer = api.LAYER_VERSION, .query = .{
+        .invokeWithTakeout = &.{ .takeout_id = 45, .query = .{ .ping = &.{ .ping_id = 123 } } },
+    } } };
+    const value = try roundTrip(api.AnyFunction, request);
+    defer value.deinit(std.testing.allocator);
+    const wrapped = value.data.invokeWithLayer;
+    try std.testing.expectEqual(api.LAYER_VERSION, wrapped.layer);
+    try std.testing.expectEqual(45, wrapped.query.invokeWithTakeout.takeout_id);
+    try std.testing.expectEqual(123, wrapped.query.invokeWithTakeout.query.ping.ping_id);
+    var wire: [64]u8 = undefined;
+    const response = try utils.Response.decode(std.testing.allocator, wrapped.resultOps(), try api.pong.serialize(&.{ .msg_id = 1, .ping_id = 123 }, &wire));
+    defer response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(123, (try response.from(api.ping)).pong.ping_id);
 }
 
-test "vectors of strings" {
-    const obj = api.TL{ .ChannelAdminLogEventActionChangeUsernames = &.{ .prev_value = &[_][]const u8{"test"}, .new_value = &[_][]const u8{ "test2", "hieveryone!!!!!!!!!!" } } };
-
-    const sbuf = try std.testing.allocator.alloc(u8, obj.serializeSize());
-    defer std.testing.allocator.free(sbuf);
-
-    const ser_size = obj.serialize(sbuf);
-
-    try std.testing.expectEqual(sbuf.len, ser_size);
-
-    var size: usize = 0;
-
-    const deser_read = api.TL.deserializeSize(sbuf, &size);
-
-    try std.testing.expectEqual(sbuf.len, deser_read);
-
-    const dbuf = try std.testing.allocator.alloc(u8, size);
-    defer std.testing.allocator.free(dbuf);
-
-    const deserializedx = api.TL.deserialize(sbuf, dbuf);
-
-    const deserialized = deserializedx[0];
-
-    try std.testing.expect(size >= deserializedx[1]);
-    try std.testing.expectEqual(ser_size, deserializedx[2]);
-
-    switch (deserialized) {
-        .ChannelAdminLogEventActionChangeUsernames => |x| {
-            try std.testing.expectEqualStrings("test", x.prev_value[0]);
-            try std.testing.expectEqualStrings("test2", x.new_value[0]);
-            try std.testing.expectEqualStrings("hieveryone!!!!!!!!!!", x.new_value[1]);
-        },
-        else => unreachable,
-    }
-
-    var size_again: usize = 0;
-
-    deserialized.cloneSize(&size_again);
-
-    try std.testing.expect(size >= size_again);
-
-    const clonebuf = try std.testing.allocator.alloc(u8, size_again);
-    defer std.testing.allocator.free(clonebuf);
-
-    const clone = deserialized.clone(clonebuf);
-
-    try std.testing.expectEqual(size_again, clone[1]);
-
-    switch (clone[0]) {
-        .ChannelAdminLogEventActionChangeUsernames => |x| {
-            try std.testing.expectEqualStrings("test", x.prev_value[0]);
-            try std.testing.expectEqualStrings("test2", x.new_value[0]);
-            try std.testing.expectEqualStrings("hieveryone!!!!!!!!!!", x.new_value[1]);
-        },
-        else => unreachable,
-    }
+test "vectors of strings survive decode and cloning" {
+    const value = try roundTrip(api.channelAdminLogEventActionChangeUsernames, &.{ .prev_value = &.{"test"}, .new_value = &.{ "test2", "hieveryone!!!!!!!!!!" } });
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("test", value.data.prev_value[0]);
+    try std.testing.expectEqualStrings("test2", value.data.new_value[0]);
+    try std.testing.expectEqualStrings("hieveryone!!!!!!!!!!", value.data.new_value[1]);
 }

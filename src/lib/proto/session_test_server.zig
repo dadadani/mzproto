@@ -37,7 +37,7 @@ pub const RpcResult = struct {
     msg_id: u64,
     seqno: u32 = 0,
     req_msg_id: u64,
-    result: tl.TL,
+    result: tl.AnyObject,
 };
 
 pub fn init(dummy: *Transport.Dummy, auth_key_id: *const [8]u8, auth_key: *const [256]u8, session_id: u64, salt: u64) SessionTestServer {
@@ -93,14 +93,14 @@ pub fn sendServerBody(self: *SessionTestServer, allocator: std.mem.Allocator, io
     try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
 }
 
-pub fn sendRpcResult(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, req_msg_id: u64, result: tl.TL) !void {
-    const result_size = result.serializeSize();
+pub fn sendRpcResult(self: *SessionTestServer, allocator: std.mem.Allocator, io: std.Io, message_id: u64, req_msg_id: u64, result: tl.AnyObject) !void {
+    const result_size = try result.serializedSize();
     var body = try allocator.alloc(u8, 12 + result_size);
     defer allocator.free(body);
 
     std.mem.writeInt(u32, body[0..4], RPC_RESULT_CID, .little);
     std.mem.writeInt(u64, body[4..12], req_msg_id, .little);
-    _ = result.serialize(body[12..]);
+    _ = try result.serialize(body[12..]);
 
     try self.sendServerBodyWithMessageId(allocator, io, message_id, body);
 }
@@ -146,14 +146,14 @@ pub fn sendRpcResultContainer(self: *SessionTestServer, allocator: std.mem.Alloc
     defer allocator.free(messages);
 
     for (responses, 0..) |response, i| {
-        const result_size = response.result.serializeSize();
+        const result_size = try response.result.serializedSize();
         const body = try allocator.alloc(u8, 12 + result_size);
         bodies[bodies_len] = body;
         bodies_len += 1;
 
         std.mem.writeInt(u32, body[0..4], RPC_RESULT_CID, .little);
         std.mem.writeInt(u64, body[4..12], response.req_msg_id, .little);
-        _ = response.result.serialize(body[12..]);
+        _ = try response.result.serialize(body[12..]);
 
         messages[i] = .{
             .msg_id = response.msg_id,

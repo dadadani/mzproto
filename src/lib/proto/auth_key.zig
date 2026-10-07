@@ -92,6 +92,7 @@ fn defaultKeys() []const RSAPublicKey {
             \\t6N/byY9Nw9p21Og3AoXSL2q/2IJ1WRUhebgAdGVMlV1fkuOQoEzR7EdpqtQD9Cs
             \\5+bfo3Nhmcyvk5ftB0WkJ9z6bNZ7yxrP8wIDAQAB
             \\-----END RSA PUBLIC KEY-----
+            ,
         };
         @setEvalBranchQuota(1000000);
 
@@ -173,24 +174,24 @@ const AuthGen = struct {
         try self.transport.writeVec(self.io, &dataa);
     }
 
-    fn reqPQ(self: *AuthGen) !utils.Deserialized {
+    fn reqPQ(self: *AuthGen) !utils.Owned(tl.ResPQ) {
         //self.nonce = std.crypto.random.int(u128);
 
         try std.Io.randomSecure(self.io, @ptrCast(&self.nonce));
-        var data: [tl.TL.serializeSize(&tl.TL{ .ProtoReqPqMulti = &.{ .nonce = 0 } })]u8 = undefined;
-        const toWrite = tl.TL.serialize(&.{ .ProtoReqPqMulti = &.{ .nonce = self.nonce } }, &data);
+        var data: [20]u8 = undefined;
+        const toWrite = try tl.AnyFunction.serialize(.{ .req_pq_multi = &.{ .nonce = self.nonce } }, &data);
 
-        try self.sendData(data[0..toWrite]);
+        try self.sendData(toWrite);
 
-        const d = try self.recvData();
+        const d = try self.recvData(tl.ResPQ);
         errdefer d.deinit(self.allocator);
 
-        if (d.data != .ProtoResPQ) {
+        if (d.data != .resPQ) {
             self.status = .Failed;
             log.err("received data is not ProtoResPQ", .{});
             return GenError.FailedResPQ;
         }
-        const resPQ = d.data.ProtoResPQ;
+        const resPQ = d.data.resPQ;
         if (resPQ.nonce != self.nonce) {
             self.status = .Failed;
             log.err("the received resPQ.nonce is not the same as the stored one", .{});
@@ -202,7 +203,7 @@ const AuthGen = struct {
     }
 
     /// Receive data in plain text mode
-    fn recvData(self: *AuthGen) !utils.Deserialized {
+    fn recvData(self: *AuthGen, comptime Codec: type) !utils.Owned(Codec) {
         const len = try self.transport.recvLen(self.io);
 
         const buf = try self.allocator.alloc(u8, len);
@@ -216,18 +217,13 @@ const AuthGen = struct {
             return GenError.InvalidResponse;
         }
 
+        if (buf.len < 20) return GenError.InvalidResponse;
         const len_body = std.mem.readInt(u32, buf[16..20], .little);
-        var size: usize = 0;
-        _ = tl.TL.deserializeSize(buf[20 .. 20 + len_body], &size);
-        const dest = try self.allocator.alloc(u8, size);
-        errdefer self.allocator.free(dest);
-
-        const des = tl.TL.deserialize(buf[20 .. 20 + len_body], dest);
-
-        return .{ .ptr = dest, .data = des[0] };
+        if (len_body != buf.len - 20 or !std.mem.allEqual(u8, buf[0..8], 0)) return GenError.InvalidResponse;
+        return utils.Owned(Codec).decode(self.allocator, buf[20..]);
     }
 
-    fn reqDH(self: *AuthGen, resPQ: *const tl.ProtoResPQ) !void {
+    fn reqDH(self: *AuthGen, resPQ: *const tl.resPQ.Decoded) !void {
         {
             self.public_key = null;
 
@@ -278,19 +274,19 @@ const AuthGen = struct {
             var written: usize = 0;
 
             if (self.temp_key) {
-                const innerData = tl.TL{ .ProtoPQInnerDataTempDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq, .expires_in = TEMP_KEYS_EXPIRE_IN_S } };
-                written = innerData.serialize(&sbuf);
+                const innerData = tl.AnyObject{ .p_q_inner_data_temp_dc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq, .expires_in = TEMP_KEYS_EXPIRE_IN_S } };
+                written = (try innerData.serialize(&sbuf)).len;
             } else {
-                const innerData = tl.TL{ .ProtoPQInnerDataDc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
-                written = innerData.serialize(&sbuf);
+                const innerData = tl.AnyObject{ .p_q_inner_data_dc = &.{ .dc = @bitCast(dcId), .new_nonce = self.new_nonce, .nonce = self.nonce, .server_nonce = self.server_nonce, .p = &pBytes, .q = &qBytes, .pq = resPQ.pq } };
+                written = (try innerData.serialize(&sbuf)).len;
             }
 
             const bytes = try rsaPad(self.io, sbuf[0..written], self.public_key.?[0], self.public_key.?[1]);
 
             var req_dh: [500]u8 = undefined;
 
-            const r = tl.TL{ .ProtoReqDHParams = &.{ .encrypted_data = &bytes, .nonce = self.nonce, .p = &pBytes, .q = &qBytes, .public_key_fingerprint = selectedFingerprint, .server_nonce = self.server_nonce } };
-            written = r.serialize(&req_dh);
+            const r = tl.AnyFunction{ .req_DH_params = &.{ .encrypted_data = &bytes, .nonce = self.nonce, .p = &pBytes, .q = &qBytes, .public_key_fingerprint = selectedFingerprint, .server_nonce = self.server_nonce } };
+            written = (try r.serialize(&req_dh)).len;
 
             if (self.temp_key) {
                 self.expiration = std.Io.Clock.Timestamp.now(self.io, .boot).addDuration(.{ .clock = .boot, .raw = std.Io.Duration.fromSeconds(TEMP_KEYS_EXPIRE_IN_S) });
@@ -304,16 +300,16 @@ const AuthGen = struct {
         var iv: [32]u8 = undefined;
 
         const deser, const buf_deser = inner_data: {
-            const d = try self.recvData();
+            const d = try self.recvData(tl.Server_DH_Params);
             defer d.deinit(self.allocator);
 
-            if (d.data != .ProtoServerDHParamsOk) {
+            if (d.data != .server_DH_params_ok) {
                 self.status = .Failed;
-                log.err("The response is not .ProtoServerDHParamsOk", .{});
+                log.err("The response is not .server_DH_params_ok", .{});
                 return GenError.FailedReqDH;
             }
 
-            const dhParamsOk = d.data.ProtoServerDHParamsOk;
+            const dhParamsOk = d.data.server_DH_params_ok;
 
             if (dhParamsOk.nonce != self.nonce) {
                 self.status = .Failed;
@@ -369,11 +365,11 @@ const AuthGen = struct {
                 @memcpy(iv[28..32], tmp[0..4]);
             }
 
+            if (dhParamsOk.encrypted_answer.len < 20 or dhParamsOk.encrypted_answer.len % 16 != 0) return GenError.InvalidResponse;
             ige(dhParamsOk.encrypted_answer, @constCast(dhParamsOk.encrypted_answer), &key, &iv, false);
 
-            var size: usize = 0;
-
-            const answer_len = tl.TL.deserializeSize(dhParamsOk.encrypted_answer[20..], &size);
+            const layout = try tl.server_DH_inner_data.measure(dhParamsOk.encrypted_answer[20..]);
+            const answer_len = layout.tl_bytes;
 
             {
                 var computed_hash: [20]u8 = undefined;
@@ -384,22 +380,16 @@ const AuthGen = struct {
                 }
             }
 
-            const buf_deser = try self.allocator.alloc(u8, size);
+            const buf_deser = try self.allocator.alignedAlloc(u8, .fromByteUnits(tl.server_DH_inner_data.out_alignment), layout.object_bytes);
             errdefer self.allocator.free(buf_deser);
 
-            const deser = tl.TL.deserialize(dhParamsOk.encrypted_answer[20..], buf_deser);
+            const deser = try tl.server_DH_inner_data.decodeExact(dhParamsOk.encrypted_answer[20..][0..answer_len], buf_deser);
 
-            break :inner_data .{ deser[0], buf_deser };
+            break :inner_data .{ deser, buf_deser };
         };
         defer self.allocator.free(buf_deser);
 
-        if (deser != .ProtoServerDHInnerData) {
-            self.status = .Failed;
-            log.err("the response is not ProtoServerDHInnerData", .{});
-            return GenError.FailedReqDH;
-        }
-
-        const dhInnerData = deser.ProtoServerDHInnerData;
+        const dhInnerData = deser;
 
         if (self.message_id) |message_id| {
             message_id.updateTime(self.io, dhInnerData.server_time);
@@ -462,10 +452,10 @@ const AuthGen = struct {
         var gbBytes: [256]u8 = undefined;
         std.mem.writeInt(u2048, &gbBytes, @intCast(gB), .big);
 
-        const dhClientInnerData = tl.TL{ .ProtoClientDHInnerData = &.{ .nonce = self.nonce, .server_nonce = self.server_nonce, .retry_id = 0, .g_b = &gbBytes } };
+        const dhClientInnerData = tl.AnyObject{ .client_DH_inner_data = &.{ .nonce = self.nonce, .server_nonce = self.server_nonce, .retry_id = 0, .g_b = &gbBytes } };
 
         var divisiblePadding: u8 = 0;
-        const serSize = dhClientInnerData.serializeSize();
+        const serSize = try dhClientInnerData.serializedSize();
 
         while ((20 + serSize + divisiblePadding) % 16 != 0) {
             divisiblePadding += 1;
@@ -478,22 +468,22 @@ const AuthGen = struct {
         };
         defer self.allocator.free(bufSer);
 
-        var written = dhClientInnerData.serialize(bufSer[20 .. 20 + serSize]);
+        var written = (try dhClientInnerData.serialize(bufSer[20 .. 20 + serSize])).len;
 
         try std.Io.randomSecure(self.io, bufSer[20 + written .. 20 + written + divisiblePadding]);
         std.crypto.hash.Sha1.hash(bufSer[20 .. 20 + written], bufSer[0..20], .{});
 
         ige(bufSer, bufSer, &key, &iv, true);
 
-        const setDH = tl.TL{ .ProtoSetClientDHParams = &.{ .nonce = self.nonce, .server_nonce = self.server_nonce, .encrypted_data = bufSer[0 .. 20 + written + divisiblePadding] } };
+        const setDH = tl.AnyFunction{ .set_client_DH_params = &.{ .nonce = self.nonce, .server_nonce = self.server_nonce, .encrypted_data = bufSer[0 .. 20 + written + divisiblePadding] } };
 
-        const bufSer2 = self.allocator.alloc(u8, setDH.serializeSize()) catch |err| {
+        const bufSer2 = self.allocator.alloc(u8, try setDH.serializedSize()) catch |err| {
             self.status = .Failed;
             return err;
         };
         defer self.allocator.free(bufSer2);
 
-        written = setDH.serialize(bufSer2);
+        written = (try setDH.serialize(bufSer2)).len;
 
         self.sendData(bufSer2[0..written]) catch |err| {
             self.status = .Failed;
@@ -504,10 +494,10 @@ const AuthGen = struct {
     }
 
     fn setClientDH(self: *AuthGen) !GeneratedAuthKey {
-        const d = try self.recvData();
+        const d = try self.recvData(tl.Set_client_DH_params_answer);
         defer d.deinit(self.allocator);
         switch (d.data) {
-            .ProtoDhGenOk => |dh_gen_ok| {
+            .dh_gen_ok => |dh_gen_ok| {
                 var result = GeneratedAuthKey{
                     .auth_key = undefined,
                     .first_salt = 0,
@@ -561,7 +551,7 @@ const AuthGen = struct {
                 self.status = .Completed;
                 return result;
             },
-            .ProtoDhGenRetry => {
+            .dh_gen_retry => {
                 // TODO: retry
                 self.status = .Failed;
                 log.err("Received ProtoDhGenRetry", .{});
@@ -663,7 +653,7 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, transport: *Transport,
     defer req_pq.deinit(allocator);
 
     const td = req_pq.data;
-    try self.reqDH(td.ProtoResPQ);
+    try self.reqDH(td.resPQ);
 
     const set_client_dh = try self.setClientDH();
 

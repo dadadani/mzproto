@@ -3,7 +3,7 @@ const std = @import("std");
 const Transport = @import("../transport.zig").Transport;
 const MessageID = @import("./message_id.zig");
 const utils = @import("./utils.zig");
-const deserializeStringNoCopy = @import("tl_base").deserializeStringNoCopy;
+const base = @import("tl_base");
 const TransportConnector = @import("../transport_connector.zig");
 const DcId = @import("../utils.zig").DcId;
 const AuthKey = @import("./auth_key.zig");
@@ -20,34 +20,23 @@ const PING_WRITE_INTERVAL_SECS = 30;
 
 const log = std.log.scoped(.mzproto_session);
 
-pub fn isContentRelated(obj: tl.TL.Enum) bool {
-    return switch (obj) {
-
-        // A client must never mark msgs_ack, msg_container, msg_copy, gzip_packed constructors (i.e. containers and acknowledgements)
-        // as content-related, or else a bad_msg_notification with error_code=34 will be emitted.
-
-        .ProtoMsgsAck,
-        .ProtoMessageContainer,
-        //.ProtoMsgCopy,
-        .ProtoGzipPacked,
-
-        // Service messages documented as not requiring acknowledgment.
-        .ProtoPing,
-        .ProtoPong,
-        .ProtoPingDelayDisconnect,
-        .ProtoFutureSalt,
-        .ProtoFutureSalts,
-        .ProtoBadMsgNotification,
-        .ProtoBadServerSalt,
-        .ProtoMsgsStateInfo,
-        .ProtoMsgsAllInfo,
-        .ProtoMsgDetailedInfo,
-        .ProtoMsgNewDetailedInfo,
-        .ProtoHttpWait,
-        => false,
-
-        // A client must always mark all API-level RPC queries as content-related,
-        // or else a bad_msg_notification with error_code=35 will be emitted.
+pub fn isContentRelated(id: u32) bool {
+    return switch (id) {
+        tl.msgs_ack.tl_id, 
+        tl.proto.MessageContainer.id, 
+        tl.gzip_packed.tl_id, 
+        tl.ping.tl_id, 
+        tl.pong.tl_id, 
+        tl.ping_delay_disconnect.tl_id, 
+        tl.future_salt.tl_id, 
+        tl.future_salts.tl_id, 
+        tl.bad_msg_notification.tl_id, 
+        tl.bad_server_salt.tl_id, 
+        tl.msgs_state_info.tl_id, 
+        tl.msgs_all_info.tl_id, 
+        tl.msg_detailed_info.tl_id, 
+        tl.msg_new_detailed_info.tl_id, 
+        tl.http_wait.tl_id => false,
         else => true,
     };
 }
@@ -88,9 +77,8 @@ const PendingAnswer = struct {
     last_probed_at: std.Io.Timestamp = .zero,
     proto_req_id: ?u64 = null,
     proto_container_id: ?u64 = null,
-    deserializeResultSize: *const (fn (in: []const u8, size: *usize) usize),
-    deserializeResult: *const (fn (noalias in: []const u8, noalias out: []u8) struct { tl.TL, usize, usize }),
-    data: ?SendError!utils.Deserialized,
+    result_ops: ?base.ResultOps,
+    data: ?SendError!utils.Response,
 };
 
 const Request = struct {
@@ -107,7 +95,7 @@ new_session_message_id: u64 = 0,
 
 seq_no: usize,
 
-salts: std.ArrayList(tl.ProtoFutureSalt),
+salts: std.ArrayList(tl.future_salt),
 requesting_salts: bool = false,
 
 stored_msg_ids: utils.Ring(u64, MSG_ID_CHECK_SET_SIZE) = .{ .buf = @splat(0) },
@@ -132,7 +120,7 @@ pending_answers: struct {
         }
 
         const pending_req = try allocator.create(PendingAnswer);
-        pending_req.* = .{ .deserializeResult = undefined, .deserializeResultSize = undefined, .data = null };
+        pending_req.* = .{ .result_ops = null, .data = null };
         req.value_ptr.* = pending_req;
         return pending_req;
     }
@@ -195,7 +183,7 @@ pub const SessionError = error{
     TransportUnknown,
 };
 
-pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable || tl.Error;
+pub const ProcessMessageError = error{UnknownIncomingMessage} || std.mem.Allocator.Error || std.Io.Reader.LimitedAllocError || std.Io.Cancelable || base.cursor.Error;
 
 const MessageContainerLayout = struct {
     pub const CONSTRUCTOR = 0;
@@ -268,7 +256,7 @@ inline fn nextSeqNo(self: *Session, is_content_related: bool) u32 {
 }
 
 /// The mutex is assumed to be already acquired.
-fn getSalt(self: *Session, io: std.Io) tl.ProtoFutureSalt {
+fn getSalt(self: *Session, io: std.Io) tl.future_salt {
     if (self.salts.items.len == 0) {
         return .{ .salt = 0, .valid_since = 0, .valid_until = 0 };
     }
@@ -325,7 +313,7 @@ fn maybeRequestFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Alloca
 
     log.debug("Requesting more salts - {f}", .{self.dc});
 
-    self.sendNoWait(io, allocator, tl.TL{ .ProtoGetFutureSalts = &.{ .num = SALTS_TO_OBTAIN } }, null, false) catch {
+    self.sendNoWait(io, allocator, tl.AnyFunction{ .get_future_salts = &.{ .num = SALTS_TO_OBTAIN } }, null, false) catch {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
@@ -354,14 +342,10 @@ fn resendUnprocessedRequests(self: *Session, allocator: std.mem.Allocator, io: s
     }
 }
 
-fn handleMsgsAck(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.ProtoMessage) !void {
-    var size: usize = 0;
-    _ = tl.ProtoMsgsAck.deserializeSize(message.body[4..], &size);
-
-    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoMsgsAck), size);
-    defer allocator.free(buf);
-
-    const ack_msgs, _, _ = tl.ProtoMsgsAck.deserialize(message.body[4..], buf);
+fn handleMsgsAck(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.proto.Message) !void {
+    const owned = try utils.Owned(tl.msgs_ack).decode(allocator, message.body);
+    defer owned.deinit(allocator);
+    const ack_msgs = owned.data;
 
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
@@ -390,14 +374,10 @@ fn handleMsgsAck(self: *Session, allocator: std.mem.Allocator, io: std.Io, messa
     }
 }
 
-fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    var size: usize = 0;
-    _ = tl.IProtoBadMsgNotification.deserializeSize(message.body, &size);
-
-    const buf = try allocator.alloc(u8, size);
-    defer allocator.free(buf);
-
-    const bad_msg, _, _ = tl.IProtoBadMsgNotification.deserialize(message.body, buf);
+fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    const owned = try utils.Owned(tl.BadMsgNotification).decode(allocator, message.body);
+    defer owned.deinit(allocator);
+    const bad_msg = owned.data;
 
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
@@ -406,7 +386,7 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
         switch (bad_msg) {
             // incorrect server salt (in this case, the bad_server_salt response is received with
             // the correct salt, and the message is to be re-sent with it)
-            .ProtoBadServerSalt => |x| {
+            .bad_server_salt => |x| {
                 log.warn("got ProtoBadServerSalt - {f}", .{self.dc});
                 self.requesting_salts = false;
                 if (self.salts.items.len == 0) {
@@ -426,7 +406,7 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
                 }
                 break :brk x.bad_msg_id;
             },
-            .ProtoBadMsgNotification => |x| {
+            .bad_msg_notification => |x| {
                 switch (x.error_code) {
                     // msg_id too low (most likely, client time is wrong;
                     // it would be worthwhile to synchronize it using msg_id notifications
@@ -529,7 +509,7 @@ fn handleBadNotification(self: *Session, io: std.Io, allocator: std.mem.Allocato
     answer_ptr.*.event.set(io);
 }
 
-fn tryToRecover(self: *Session, err: *const tl.ProtoRpcError, req: *PendingAnswer) bool {
+fn tryToRecover(self: *Session, err: *const tl.rpc_error.Decoded, req: *PendingAnswer) bool {
     _ = req;
     if (std.mem.eql(u8, err.error_message, "CONNECTION_NOT_INITED") or std.mem.eql(u8, err.error_message, "CONNECTION_LAYER_INVALID")) {
         self.init_ok = false;
@@ -538,122 +518,53 @@ fn tryToRecover(self: *Session, err: *const tl.ProtoRpcError, req: *PendingAnswe
     return false;
 }
 
-fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.ProtoRPCResult) ProcessMessageError!void {
-    const req_id, const deserializeResultSize, const deserializeResult = blk: {
+fn handleRPCResult(self: *Session, io: std.Io, allocator: std.mem.Allocator, rpc_result: tl.proto.RpcResult) ProcessMessageError!void {
+    const req_id, const ops = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
-
-        const req_id = self.pending_answers_idmap.get(rpc_result.req_msg_id) orelse {
-            // TODO: do something?
-            log.warn("Received unmapped RPC Result {d} - {f}", .{ rpc_result.req_msg_id, self.dc });
-            return;
-        };
-
-        const req = self.pending_answers.map.getPtr(req_id) orelse {
-            // TODO: do something?
-            log.warn("Received unmapped RPC Result {d}->{d} - {f}", .{ rpc_result.req_msg_id, req_id, self.dc });
-            return;
-        };
-
-        break :blk .{ req_id, req.*.deserializeResultSize, req.*.deserializeResult };
+        const req_id = self.pending_answers_idmap.get(rpc_result.req_msg_id) orelse return;
+        const req = self.pending_answers.map.get(req_id) orelse return;
+        break :blk .{ req_id, req.result_ops orelse return error.InvalidData };
     };
-
-    log.debug("Received RPC Result, {d}->{d} - {f}", .{ rpc_result.req_msg_id, req_id, self.dc });
-
-    const id = tl.TL.identify(std.mem.readInt(u32, rpc_result.body[0..4], .little));
-
-    const deserialized, const buf = blk: {
-        if (id == .ProtoGzipPacked) {
-            const gzip = deserializeStringNoCopy(rpc_result.body[4..]);
-            var reader = std.Io.Reader.fixed(gzip);
-
-            var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
-
-            const decompressed = try decompress.reader.allocRemaining(allocator, .limited64(4000000));
-            defer allocator.free(decompressed);
-
-            var size_deserialize: usize = 0;
-            _ = deserializeResultSize(decompressed, &size_deserialize);
-
-            const buf = try allocator.alloc(u8, size_deserialize);
-            errdefer allocator.free(buf);
-
-            const deserialized, _, _ = deserializeResult(decompressed, buf);
-            break :blk .{ deserialized, buf };
-        }
-
-        if (id == .ProtoRpcError) {
-            var size: usize = 0;
-            _ = tl.ProtoRpcError.deserializeSize(rpc_result.body[4..], &size);
-
-            const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoRpcError), size);
-            errdefer allocator.free(buf);
-            const err, _, _ = tl.ProtoRpcError.deserialize(rpc_result.body[4..], buf);
-
-            break :blk .{ tl.TL{ .ProtoRpcError = err }, buf };
-        }
-
-        var size_deserialize: usize = 0;
-        _ = deserializeResultSize(rpc_result.body, &size_deserialize);
-
-        const buf = try allocator.alloc(u8, size_deserialize);
-        errdefer allocator.free(buf);
-
-        const deserialized, _, _ = deserializeResult(rpc_result.body, buf);
-
-        break :blk .{ deserialized, buf };
-    };
+    var response = try decodeRPCResult(allocator, ops, rpc_result.body, 0);
+    var transferred = false;
+    defer if (!transferred) response.deinit(allocator);
 
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
-
-    var buf_used = false;
-
-    defer {
-        if (!buf_used) {
-            allocator.free(buf);
-        }
-    }
-
-    const answer = self.pending_answers.map.getPtr(req_id) orelse {
+    const answer = self.pending_answers.map.get(req_id) orelse return;
+    if (answer.status == .answered) return;
+    if (answer.proto_container_id) |container_id| self.removeMessageFromContainer(allocator, container_id, req_id);
+    if (response.data == .rpc_error and self.tryToRecover(response.data.rpc_error, answer)) {
+        answer.data = SendError.Resend;
+        answer.event.set(io);
         return;
-    };
-
-    if (answer.*.proto_container_id) |container_id| {
-        self.removeMessageFromContainer(allocator, container_id, req_id);
     }
-
-    if (deserialized == .ProtoRpcError) {
-        if (self.tryToRecover(deserialized.ProtoRpcError, answer.*)) {
-            //allocator.free(buf);
-
-            //if (answer.*.proto_container_id) |container_id| {
-            //    self.removeMessageFromContainer(allocator, container_id, req_id);
-            //}
-
-            answer.*.data = SendError.Resend;
-            answer.*.event.set(io);
-            return;
-        }
-        answer.*.data = .{ .ptr = buf, .alignment = .of(tl.ProtoRpcError), .data = deserialized };
-    } else {
-        answer.*.data = .{ .data = deserialized, .ptr = buf };
-    }
-
-    buf_used = true;
-
-    answer.*.status = .answered;
-    answer.*.last_probed_at = .now(io, .boot);
-
-    answer.*.event.set(io);
-
+    answer.data = response;
+    transferred = true;
+    answer.status = .answered;
+    answer.last_probed_at = .now(io, .boot);
+    answer.event.set(io);
     self.init_ok = true;
 }
 
-fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    var buf: [@sizeOf(tl.ProtoMsgDetailedInfo)]u8 align(@alignOf(tl.ProtoMsgDetailedInfo)) = undefined;
+fn decodeRPCResult(allocator: std.mem.Allocator, ops: base.ResultOps, body: []const u8, depth: usize) ProcessMessageError!utils.Response {
+    if (depth >= 128) return error.InvalidData;
+    if (tl.identify(body) == .gzip_packed) {
+        const packed_object = try utils.Owned(tl.gzip_packed).decode(allocator, body);
+        defer packed_object.deinit(allocator);
+        var reader = std.Io.Reader.fixed(packed_object.data.packed_data);
+        var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
+        const decompressed = try decompress.reader.allocRemaining(allocator, .limited64(4000000));
+        defer allocator.free(decompressed);
+        return decodeRPCResult(allocator, ops, decompressed, depth + 1);
+    }
+    return utils.Response.decode(allocator, ops, body);
+}
 
-    const msg_detailed, _, _ = tl.IProtoMsgDetailedInfo.deserialize(message.body, &buf);
+fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    var buf: [256]u8 align(tl.MsgDetailedInfo.out_alignment) = undefined;
+    const msg_detailed = try tl.MsgDetailedInfo.decodeExact(message.body, &buf);
 
     log.debug("Received ProtoMsgDetailedInfo - {f}", .{self.dc});
 
@@ -662,7 +573,7 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
     switch (msg_detailed) {
         // The docs say this constructor is sent when the client sends an rpc request with a duplicate msg_id and the response is large.
         // This shouldn't probably happen normally since every message sent by the client always have a fresh msg_id, but handling is a good idea nonetheless
-        .ProtoMsgDetailedInfo => |detailed_info| {
+        .msg_detailed_info => |detailed_info| {
             const resend = resend: {
                 try self.mutex.lock(io);
                 defer self.mutex.unlock(io);
@@ -676,136 +587,82 @@ fn handleNewDetailedInfo(self: *Session, io: std.Io, allocator: std.mem.Allocato
                 break :resend contains;
             };
             if (resend) {
-                self.sendNoWait(io, allocator, tl.TL{ .ProtoMsgResendReq = &.{ .msg_ids = &.{detailed_info.answer_msg_id} } }, null, false) catch {
+                self.sendNoWait(io, allocator, tl.AnyObject{ .msg_resend_req = &.{ .msg_ids = &.{detailed_info.answer_msg_id} } }, null, false) catch {
                     //
                 };
             }
         },
         // This variant is used we the server sends a message that is not bound to an rpc_result (eg. updates).
         // We will probably never need it since this part is generally handled by the higher-level update handler
-        .ProtoMsgNewDetailedInfo => |new_detailed_info| {
-            self.sendNoWait(io, allocator, tl.TL{ .ProtoMsgResendReq = &.{ .msg_ids = &.{new_detailed_info.answer_msg_id} } }, null, false) catch {
+        .msg_new_detailed_info => |new_detailed_info| {
+            self.sendNoWait(io, allocator, tl.AnyObject{ .msg_resend_req = &.{ .msg_ids = &.{new_detailed_info.answer_msg_id} } }, null, false) catch {
                 //
             };
         },
     }
 }
 
-inline fn handleFutureSalt(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    var buf: [@sizeOf(tl.ProtoFutureSalt)]u8 align(@alignOf(tl.ProtoFutureSalt)) = undefined;
-    const future_salt, _, _ = tl.ProtoFutureSalt.deserialize(message.body[4..], &buf);
+inline fn handleFutureSalt(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    var buf: [256]u8 align(tl.future_salt.out_alignment) = undefined;
+    const future_salt = try tl.future_salt.decodeExact(message.body, &buf);
 
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
 
     self.requesting_salts = false;
 
-    try self.salts.append(allocator, future_salt.*);
+    try self.salts.append(allocator, .{ .salt = future_salt.salt, .valid_since = future_salt.valid_since, .valid_until = future_salt.valid_until });
 }
 
-fn handleFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    var len: usize = 0;
-    _ = tl.ProtoFutureSalts.deserializeSize(message.body[4..], &len);
-
-    var found_req = false;
-
+fn handleFutureSalts(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    const owned = try utils.Owned(tl.future_salts).decode(allocator, message.body);
+    defer owned.deinit(allocator);
+    const salts = owned.data;
     try self.mutex.lock(io);
     defer self.mutex.unlock(io);
-
     self.requesting_salts = false;
-
-    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoFutureSalts), len);
-    defer {
-        if (!found_req) {
-            allocator.free(buf);
-        }
-    }
-
-    const salts, _, _ = tl.ProtoFutureSalts.deserialize(message.body[4..], buf);
-
-    try self.salts.appendSlice(allocator, salts.salts);
-
-    log.debug("Added {d} salts - {f}", .{ salts.salts.len, self.dc });
-
-    const req_id = self.pending_answers_idmap.get(salts.req_msg_id) orelse {
-        // TODO: do something?
-        return;
-    };
-
-    const answer = self.pending_answers.map.getPtr(req_id) orelse {
-        // TODO: do something?
-        return;
-    };
-
-    found_req = true;
-
-    answer.*.status = .answered;
-    answer.*.last_probed_at = .now(io, .boot);
-
-    if (answer.*.proto_container_id) |container_id| {
-        self.removeMessageFromContainer(allocator, container_id, req_id);
-    }
-
-    answer.*.data = .{ .data = tl.TL{ .ProtoFutureSalts = salts }, .ptr = buf, .alignment = .of(tl.ProtoFutureSalts) };
-    answer.*.event.set(io);
-
-    //  const future_salts, _, _ = tl.ProtoFutureSalts.deserialize(message.body, &buf);
-
+    for (salts.salts) |salt| try self.salts.append(allocator, .{ .salt = salt.salt, .valid_since = salt.valid_since, .valid_until = salt.valid_until });
+    const req_id = self.pending_answers_idmap.get(salts.req_msg_id) orelse return;
+    try self.completeServiceResult(allocator, io, req_id, message.body);
 }
 
-fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoPong), @sizeOf(tl.ProtoPong));
-
-    const pong, _, _ = tl.ProtoPong.deserialize(message.body[4..], buf);
-    log.debug("Received pong, ping_id: {} - {f}", .{ pong.ping_id, self.dc });
-
-    self.mutex.lock(io) catch |err| {
-        allocator.free(buf);
-        return err;
-    };
+fn handlePong(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    var workspace: [256]u8 align(tl.pong.out_alignment) = undefined;
+    const pong = try tl.pong.decodeExact(message.body, &workspace);
+    try self.mutex.lock(io);
     defer self.mutex.unlock(io);
-
-    if (self.ping_value == pong.ping_id) {
-        self.ping_disconnect = false;
-    }
-
-    const req_id = self.pending_answers_idmap.get(pong.msg_id) orelse {
-        allocator.free(buf);
-        return;
-    };
-
-    const answer = self.pending_answers.map.getPtr(req_id) orelse {
-        allocator.free(buf);
-        return;
-    };
-
-    answer.*.status = .answered;
-    answer.*.last_probed_at = .now(io, .boot);
-
-    if (answer.*.proto_container_id) |container_id| {
-        self.removeMessageFromContainer(allocator, container_id, req_id);
-    }
-
-    answer.*.data = .{ .data = .{ .ProtoPong = pong }, .ptr = buf, .alignment = .of(tl.ProtoPong) };
-    answer.*.event.set(io);
+    if (self.ping_value == pong.ping_id) self.ping_disconnect = false;
+    const req_id = self.pending_answers_idmap.get(pong.msg_id) orelse return;
+    try self.completeServiceResult(allocator, io, req_id, message.body);
 }
 
-fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    const container = try tl.ProtoMessageContainer.deserializeContainer(allocator, message.body[4..]);
-    defer allocator.free(container);
-
-    for (container) |msg| {
-        try self.processMessage(io, allocator, msg);
-    }
+/// Called with the session mutex held.
+fn completeServiceResult(self: *Session, allocator: std.mem.Allocator, io: std.Io, req_id: u32, body: []const u8) ProcessMessageError!void {
+    const answer = self.pending_answers.map.get(req_id) orelse return;
+    if (answer.status == .answered) return;
+    const response = try utils.Response.decode(allocator, answer.result_ops orelse return error.InvalidData, body);
+    if (answer.proto_container_id) |container_id| self.removeMessageFromContainer(allocator, container_id, req_id);
+    answer.data = response;
+    answer.status = .answered;
+    answer.last_probed_at = .now(io, .boot);
+    answer.event.set(io);
 }
 
-fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    const gzip = deserializeStringNoCopy(message.body[4..]);
+fn handleMessageContainer(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    const container = try tl.proto.MessageContainer.view(message.body);
+    var iterator = container.iterator();
+    while (try iterator.next()) |msg| try self.processMessage(io, allocator, msg);
+}
+
+fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    const packed_object = try utils.Owned(tl.gzip_packed).decode(allocator, message.body);
+    defer packed_object.deinit(allocator);
+    const gzip = packed_object.data.packed_data;
     var reader = std.Io.Reader.fixed(gzip);
 
     var decompress = std.compress.flate.Decompress.init(&reader, .gzip, &.{});
 
-    const decompressed = try decompress.reader.allocRemaining(allocator, .unlimited);
+    const decompressed = try decompress.reader.allocRemaining(allocator, .limited64(4000000));
     defer allocator.free(decompressed);
 
     try self.processMessage(io, allocator, .{
@@ -815,9 +672,9 @@ fn handleGZipPacked(self: *Session, io: std.Io, allocator: std.mem.Allocator, me
     });
 }
 
-fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
-    var buf: [@sizeOf(tl.ProtoNewSessionCreated)]u8 align(@alignOf(tl.ProtoNewSessionCreated)) = undefined;
-    const new_session, _, _ = tl.ProtoNewSessionCreated.deserialize(message.body[4..], &buf);
+fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
+    var buf: [256]u8 align(tl.new_session_created.out_alignment) = undefined;
+    const new_session = try tl.new_session_created.decodeExact(message.body, &buf);
 
     {
         try self.mutex.lock(io);
@@ -850,93 +707,76 @@ fn handleNewSessionCreated(self: *Session, io: std.Io, allocator: std.mem.Alloca
     }
 }
 
-inline fn handleStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.ProtoMessage) ProcessMessageError!void {
-    var size: usize = 0;
-    _ = tl.ProtoMsgsStateInfo.deserializeSize(message.body[4..], &size);
-    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoMsgsStateInfo), size);
-    const state_info, _, _ = tl.ProtoMsgsStateInfo.deserialize(message.body[4..], buf);
-
-    self.mutex.lock(io) catch |err| {
-        allocator.free(buf);
-        return err;
-    };
+inline fn handleStateInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.proto.Message) ProcessMessageError!void {
+    const owned = try utils.Owned(tl.msgs_state_info).decode(allocator, message.body);
+    var transferred = false;
+    defer if (!transferred) owned.deinit(allocator);
+    try self.mutex.lock(io);
     defer self.mutex.unlock(io);
-
-    const req_id = self.pending_answers_idmap.get(state_info.req_msg_id) orelse {
-        allocator.free(buf);
-        return;
-    };
-
-    const answer = self.pending_answers.map.getPtr(req_id) orelse {
-        allocator.free(buf);
-        return;
-    };
-
-    answer.*.status = .answered;
-    answer.*.last_probed_at = .now(io, .boot);
-    if (answer.*.proto_container_id) |container_id| {
-        self.removeMessageFromContainer(allocator, container_id, req_id);
-    }
-
-    answer.*.data = .{ .data = .{ .ProtoMsgsStateInfo = state_info }, .ptr = buf, .alignment = .of(tl.ProtoMsgsStateInfo) };
-    answer.*.event.set(io);
+    const req_id = self.pending_answers_idmap.get(owned.data.req_msg_id) orelse return;
+    const answer = self.pending_answers.map.get(req_id) orelse return;
+    if (answer.status == .answered) return;
+    if (answer.proto_container_id) |container_id| self.removeMessageFromContainer(allocator, container_id, req_id);
+    answer.data = .{ .ptr = owned.ptr, .alignment = .fromByteUnits(tl.msgs_state_info.out_alignment), .data = .{ .msgs_state_info = owned.data } };
+    transferred = true;
+    answer.status = .answered;
+    answer.last_probed_at = .now(io, .boot);
+    answer.event.set(io);
 }
 
-inline fn handleMsgsAllInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.ProtoMessage) ProcessMessageError!void {
-    var size: usize = 0;
-    _ = tl.ProtoMsgsAllInfo.deserializeSize(message.body[4..], &size);
-    const buf = try allocator.alignedAlloc(u8, std.mem.Alignment.of(tl.ProtoMsgsAllInfo), size);
-    defer allocator.free(buf);
-
-    const all_info, _, _ = tl.ProtoMsgsAllInfo.deserialize(message.body[4..], buf);
+inline fn handleMsgsAllInfo(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.proto.Message) ProcessMessageError!void {
+    const owned = try utils.Owned(tl.msgs_all_info).decode(allocator, message.body);
+    defer owned.deinit(allocator);
+    const all_info = owned.data;
 
     return self.pushStateInfo(allocator, io, all_info.msg_ids, all_info.info);
 }
 
-inline fn handlePing(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.ProtoMessage) ProcessMessageError!void {
-    var buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
-    const ping, _, _ = tl.ProtoPing.deserialize(message.body[4..], &buf);
-
-    log.debug("Received ping request from server, ping_id: {}, msg_id: {} - {f}", .{ ping.ping_id, message.msg_id, self.dc });
-
-    self.sendNoWait(io, allocator, tl.TL{ .ProtoPong = &.{ .ping_id = ping.ping_id, .msg_id = message.msg_id } }, null, false) catch {};
+inline fn handlePing(self: *Session, allocator: std.mem.Allocator, io: std.Io, message: tl.proto.Message) ProcessMessageError!void {
+    var reader = base.cursor.Deserializer.init(message.body);
+    try reader.expectId(tl.ping.tl_id);
+    const ping_id = try reader.long();
+    try reader.finish();
+    self.sendNoWait(io, allocator, tl.AnyObject{ .pong = &.{ .ping_id = ping_id, .msg_id = message.msg_id } }, null, false) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
+    };
 }
 
-fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.ProtoMessage) ProcessMessageError!void {
+fn processMessage(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.proto.Message) ProcessMessageError!void {
     //const allocator = self.arena.allocator();
 
+    if (message.body.len < 4) return error.InvalidData;
     const id = std.mem.readInt(u32, message.body[0..4], .little);
-    //std.debug.print("received {any}", .{tl.TL.identify(id)});
+    //std.debug.print("received {any}", .{tl.identifyId(id)});
 
-    if (tl.TL.identify(id)) |ty| {
+    if (id == tl.ping.tl_id) {
+        try self.handlePing(allocator, io, message);
+    } else if (tl.identifyId(id)) |ty| {
         switch (ty) {
-            .ProtoNewSessionCreated => try self.handleNewSessionCreated(io, allocator, message),
-            .ProtoRPCResult => try self.handleRPCResult(io, allocator, tl.ProtoRPCResult.deserializeNoCopy(message.body[4..])),
-            .ProtoMsgsAck => try self.handleMsgsAck(allocator, io, message),
-            .ProtoBadMsgNotification, .ProtoBadServerSalt => try self.handleBadNotification(io, allocator, message),
-            .ProtoMsgDetailedInfo, .ProtoMsgNewDetailedInfo => try self.handleNewDetailedInfo(io, allocator, message),
-            .ProtoFutureSalt => try self.handleFutureSalt(io, allocator, message),
-            .ProtoFutureSalts => try self.handleFutureSalts(io, allocator, message),
-            .ProtoPong => try self.handlePong(io, allocator, message),
-            .ProtoPing => try self.handlePing(allocator, io, message),
-            .ProtoMessageContainer => try self.handleMessageContainer(io, allocator, message),
-            .ProtoMsgsAllInfo => try self.handleMsgsAllInfo(allocator, io, message),
-            .ProtoGzipPacked => try self.handleGZipPacked(io, allocator, message),
-            .ProtoMsgsStateInfo => try self.handleStateInfo(allocator, io, message),
+            .new_session_created => try self.handleNewSessionCreated(io, allocator, message),
+            .rpcResult => try self.handleRPCResult(io, allocator, try tl.proto.RpcResult.view(message.body)),
+            .msgs_ack => try self.handleMsgsAck(allocator, io, message),
+            .bad_msg_notification, .bad_server_salt => try self.handleBadNotification(io, allocator, message),
+            .msg_detailed_info, .msg_new_detailed_info => try self.handleNewDetailedInfo(io, allocator, message),
+            .future_salt => try self.handleFutureSalt(io, allocator, message),
+            .future_salts => try self.handleFutureSalts(io, allocator, message),
+            .pong => try self.handlePong(io, allocator, message),
+
+            .messageContainer => try self.handleMessageContainer(io, allocator, message),
+            .msgs_all_info => try self.handleMsgsAllInfo(allocator, io, message),
+            .gzip_packed => try self.handleGZipPacked(io, allocator, message),
+            .msgs_state_info => try self.handleStateInfo(allocator, io, message),
             else => {
                 // TODO: send to client manager
             },
         }
-
-        // if the seqno is odd, then it needs to be acknowledged
-        if ((message.seqno & 1) != 0) {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-
-            try self.pending_ack.append(allocator, message.msg_id);
-        }
     } else {
         return ProcessMessageError.UnknownIncomingMessage;
+    }
+    if ((message.seqno & 1) != 0) {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        try self.pending_ack.append(allocator, message.msg_id);
     }
 }
 
@@ -1005,7 +845,11 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
 
         const message_bytes = buf[8 + 16 + 8 + 8 ..];
 
-        const message = tl.ProtoMessage.deserializeNoCopy(message_bytes);
+        var message_reader = base.cursor.Deserializer.init(message_bytes);
+        const message = tl.proto.Message.read(&message_reader) catch {
+            self.requestReconnect(io, .reconnect_only);
+            return;
+        };
 
         ok: {
             if (!(message.msg_id % 4 == 1 or message.msg_id % 4 == 3)) {
@@ -1041,7 +885,7 @@ fn readerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
 
         self.stored_msg_ids.push(message.msg_id);
 
-        log.debug("Incoming message, type {any} - {f}", .{ tl.TL.identify(std.mem.readInt(u32, @ptrCast(message.body[0..4]), .little)), self.dc });
+        log.debug("Incoming message, type {any} - {f}", .{ tl.identify(message.body), self.dc });
 
         self.processMessage(io, allocator, message) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
@@ -1114,9 +958,9 @@ fn setTempKey(self: *Session, allocator: std.mem.Allocator, io: std.Io, gen_key:
         self.auth_key = gen_key;
         if (self.salts.items.len > 0) {
             self.salts.shrinkAndFree(allocator, 1);
-            self.salts.items[0] = tl.ProtoFutureSalt{ .salt = gen_key.first_salt, .valid_since = 0, .valid_until = 0 };
+            self.salts.items[0] = tl.future_salt{ .salt = gen_key.first_salt, .valid_since = 0, .valid_until = 0 };
         } else {
-            try self.salts.append(allocator, tl.ProtoFutureSalt{ .salt = gen_key.first_salt, .valid_since = 0, .valid_until = 0 });
+            try self.salts.append(allocator, tl.future_salt{ .salt = gen_key.first_salt, .valid_since = 0, .valid_until = 0 });
         }
     }
 }
@@ -1185,12 +1029,12 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
         const perm_key_id_u64 = std.mem.readInt(u64, &self.perm_auth_key_id, .little);
         const temp_key_id_u64 = std.mem.readInt(u64, &self.auth_key_id, .little);
 
-        const message_to_encrypt = tl.IProtoBindAuthKeyInner{ .ProtoBindAuthKeyInner = &tl.ProtoBindAuthKeyInner{ .expires_at = @intCast(expires_at), .nonce = nonce, .perm_auth_key_id = perm_key_id_u64, .temp_auth_key_id = temp_key_id_u64, .temp_session_id = self.session_id } };
-        const fake = comptime tl.IProtoBindAuthKeyInner{ .ProtoBindAuthKeyInner = &tl.ProtoBindAuthKeyInner{ .expires_at = 0, .nonce = 0, .perm_auth_key_id = 0, .temp_auth_key_id = 0, .temp_session_id = 0 } };
-        const message_size = comptime fake.serializeSize();
+        const message_to_encrypt = tl.BindAuthKeyInner{ .bind_auth_key_inner = &tl.bind_auth_key_inner{ .expires_at = @intCast(expires_at), .nonce = nonce, .perm_auth_key_id = perm_key_id_u64, .temp_auth_key_id = temp_key_id_u64, .temp_session_id = self.session_id } };
+        const fake = comptime tl.BindAuthKeyInner{ .bind_auth_key_inner = &tl.bind_auth_key_inner{ .expires_at = 0, .nonce = 0, .perm_auth_key_id = 0, .temp_auth_key_id = 0, .temp_session_id = 0 } };
+        const message_size = comptime (fake.serializedSize() catch unreachable);
 
         var encrypted_message: [MT1Crypto.Layout.totalLen(message_size)]u8 = undefined;
-        _ = message_to_encrypt.serialize(encrypted_message[MT1Crypto.Layout.BODY..MT1Crypto.Layout.paddingOffset(message_size)]);
+        _ = message_to_encrypt.serialize(encrypted_message[MT1Crypto.Layout.BODY..MT1Crypto.Layout.paddingOffset(message_size)]) catch unreachable;
 
         var bind_salt: u64 = undefined;
         var bind_session_id: u64 = undefined;
@@ -1229,11 +1073,11 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
         const init_data = blk: {
             try self.client_manager.session_info.lock.lockShared(io);
             defer self.client_manager.session_info.lock.unlockShared(io);
-            const message = tl.TL{
-                .InvokeWithLayer = &.{
+            const message = tl.AnyFunction{
+                .invokeWithLayer = &.{
                     .layer = tl.LAYER_VERSION,
-                    .query = tl.TL{
-                        .InitConnection = &.{
+                    .query = tl.AnyFunction{
+                        .initConnection = &.{
                             .api_id = self.client_manager.session_info.api_id,
                             .device_model = self.client_manager.session_info.device_model,
                             .system_version = self.client_manager.session_info.system_version,
@@ -1242,7 +1086,7 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
                             .lang_pack = self.client_manager.session_info.lang_pack,
                             .lang_code = self.client_manager.session_info.lang_code,
                             .query = .{
-                                .AuthBindTempAuthKey = &.{
+                                .@"auth.bindTempAuthKey" = &.{
                                     .perm_auth_key_id = perm_key_id_u64,
                                     .nonce = nonce,
                                     .expires_at = @intCast(expires_at),
@@ -1264,8 +1108,8 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
         };
         defer init_data.deinit(allocator);
 
-        if (init_data.data == .ProtoRpcError) {
-            const err = init_data.data.ProtoRpcError.error_message;
+        if (init_data.data == .rpc_error) {
+            const err = init_data.data.rpc_error.error_message;
 
             log.err("Unable to bind temporary auth key to permanent auth key: {s} - {f}", .{ err, self.dc });
             self.requestReconnect(io, .reconnect_only);
@@ -1279,11 +1123,11 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
             try self.client_manager.session_info.lock.lockShared(io);
             defer self.client_manager.session_info.lock.unlockShared(io);
 
-            break :blk (self.send(io, allocator, tl.TL{
-                .InvokeWithLayer = &.{
+            break :blk (self.send(io, allocator, tl.AnyFunction{
+                .invokeWithLayer = &.{
                     .layer = tl.LAYER_VERSION,
-                    .query = tl.TL{
-                        .InitConnection = &.{
+                    .query = tl.AnyFunction{
+                        .initConnection = &.{
                             .api_id = self.client_manager.session_info.api_id,
                             .device_model = self.client_manager.session_info.device_model,
                             .system_version = self.client_manager.session_info.system_version,
@@ -1291,7 +1135,7 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
                             .system_lang_code = self.client_manager.session_info.system_lang_code,
                             .lang_pack = self.client_manager.session_info.lang_pack,
                             .lang_code = self.client_manager.session_info.lang_code,
-                            .query = .{ .HelpGetConfig = &.{} },
+                            .query = .{ .@"help.getConfig" = &.{} },
                         },
                     },
                 },
@@ -1306,15 +1150,20 @@ fn initConnection(self: *Session, allocator: std.mem.Allocator, io: std.Io) std.
 
         defer init_data.deinit(allocator);
 
-        if (init_data.data == .ProtoRpcError) {
-            const err = init_data.data.ProtoRpcError.error_message;
+        if (init_data.data == .rpc_error) {
+            const err = init_data.data.rpc_error.error_message;
             log.err("Unable to initConnection: {s} - {f}", .{ err, self.dc });
             self.requestReconnect(io, .reconnect_only);
             return std.Io.Cancelable.Canceled;
         }
-        if (init_data.data == .Config) {
-            self.client_manager.importConfig(allocator, io, init_data.data.Config) catch |err| {
-                log.warn("{f} failed to import tl.Config: {}", .{ self.dc, err });
+        if (init_data.data == .result) {
+            const config_result = init_data.from(tl.@"help.getConfig") catch {
+                self.requestReconnect(io, .reconnect_only);
+                return;
+            };
+            const config = config_result.config;
+            self.client_manager.importConfig(allocator, io, config) catch |err| {
+                log.warn("{f} failed to import tl.config: {}", .{ self.dc, err });
             };
         }
         // TODO: use the config to load things like available datacenters
@@ -1393,7 +1242,7 @@ fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, com
     const sleep: std.Io.Timeout = .{ .duration = .{ .raw = DURATION, .clock = .boot } };
 
     try sleep.sleep(io);
-    //self.sendNoWait(io, allocator, tl.TL{.ProtoMsgsStateReq =  tl.ProtoMsgsStateReq{.msg_ids = }}, null, false);
+    //self.sendNoWait(io, allocator, tl.AnyObject{.msgs_state_req =  tl.msgs_state_req{.msg_ids = }}, null, false);
     var msg_ids = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
@@ -1425,11 +1274,11 @@ fn reqMessageState(self: *Session, allocator: std.mem.Allocator, io: std.Io, com
     defer msg_ids.deinit(allocator);
 
     if (msg_ids.items.len > 0) {
-        const msg = try self.send(io, allocator, tl.TL{ .ProtoMsgsStateReq = &tl.ProtoMsgsStateReq{ .msg_ids = msg_ids.items } }, null, false);
+        const msg = try self.send(io, allocator, tl.AnyObject{ .msgs_state_req = &tl.msgs_state_req{ .msg_ids = msg_ids.items } }, null, false);
         defer msg.deinit(allocator);
 
         switch (msg.data) {
-            .ProtoMsgsStateInfo => |state_info| {
+            .msgs_state_info => |state_info| {
                 return self.pushStateInfo(allocator, io, msg_ids.items, state_info.info);
             },
             else => {},
@@ -1593,7 +1442,7 @@ inline fn payloadLen(requests: []const Request, requests_extra: []const Request,
         data_size += 8 // msg_id
             + 4 // seq_no
             + 4 // bytes
-            + (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serializeSize();
+            + ((tl.MsgsAck{ .msgs_ack = &.{ .msg_ids = pending_acks } }).serializedSize() catch unreachable);
     }
 
     for (requests) |req| {
@@ -1649,7 +1498,7 @@ inline fn payloadCreate(self: *Session, io: std.Io, data_size: usize, requests: 
             const msg_id = self.message_id.get(io);
             const start = Container.messageOffset(offset_data, b);
             const body_start = start + Container.BODY;
-            const data_wr = (tl.IProtoMsgsAck{ .ProtoMsgsAck = &.{ .msg_ids = pending_acks } }).serialize(out[body_start..]);
+            const data_wr = ((tl.MsgsAck{ .msgs_ack = &.{ .msg_ids = pending_acks } }).serialize(out[body_start..]) catch unreachable).len;
 
             b = writeContainerMessage(out, offset_data, b, msg_id, self.nextSeqNo(false), out[body_start..][0..data_wr], true);
         }
@@ -1736,7 +1585,7 @@ fn pingWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator) std.Io.C
 
         log.debug("sending PingDelayDisconnect, id: {d} - {f}", .{ ping_id, self.dc });
 
-        self.sendNoWait(io, allocator, tl.TL{ .ProtoPingDelayDisconnect = &.{ .ping_id = ping_id, .disconnect_delay = PING_WRITE_INTERVAL_SECS * 2 } }, null, false) catch |err| {
+        self.sendNoWait(io, allocator, tl.AnyFunction{ .ping_delay_disconnect = &.{ .ping_id = ping_id, .disconnect_delay = PING_WRITE_INTERVAL_SECS * 2 } }, null, false) catch |err| {
             if (err == std.Io.Cancelable.Canceled) {
                 return std.Io.Cancelable.Canceled;
             }
@@ -2090,7 +1939,7 @@ fn writerWorker(self: *Session, io: std.Io, allocator: std.mem.Allocator, transp
 }
 
 /// Enqueues a new TL function into the reader worker queue, without waiting for it to be acknowledged
-pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.TL, msg_id: ?u64, prebind: bool) !void {
+pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: anytype, msg_id: ?u64, prebind: bool) !void {
     if (self.shutdown.load(.acquire)) {
         return SendError.Shutdown;
     }
@@ -2113,12 +1962,12 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
 
     log.debug("Sending (nowait) {any} - {f}", .{ message, self.dc });
 
-    const len_serialized = message.serializeSize();
+    const len_serialized = try message.serializedSize();
 
     const buf = try allocator.alloc(u8, len_serialized);
     errdefer allocator.free(buf);
 
-    _ = message.serialize(buf);
+    _ = try message.serialize(buf);
 
     const bootstrap_queue = blk: {
         try self.mutex.lock(io);
@@ -2129,18 +1978,17 @@ pub fn sendNoWait(self: *Session, io: std.Io, allocator: std.mem.Allocator, mess
         break :blk false;
     };
     if (bootstrap_queue) {
-        try self.bootstrap_queue.putOne(io, .{ .id = null, .data = buf, .content_related = isContentRelated(message), .message_id = msg_id });
+        try self.bootstrap_queue.putOne(io, .{ .id = null, .data = buf, .content_related = isContentRelated(std.mem.readInt(u32, buf[0..4], .little)), .message_id = msg_id });
     } else {
-        try self.requests_queue.putOne(io, .{ .id = null, .data = buf, .content_related = isContentRelated(message), .message_id = msg_id });
+        try self.requests_queue.putOne(io, .{ .id = null, .data = buf, .content_related = isContentRelated(std.mem.readInt(u32, buf[0..4], .little)), .message_id = msg_id });
     }
 }
 
 /// Enqueues a new TL function into the reader worker queue, and waits for the result.
 ///
 /// Cancellation is supported for this function, but only to cancel the waiter itself (If the request has already been added to the queue, it will be sent to Telegram anyway).
-pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: tl.TL, msg_id: ?u64, prebind: bool) !utils.Deserialized {
-    const deserializeResultSize = message.getDeserializeResultSize() orelse utils.panicDeserializeResultSize;
-    const deserializeResult = message.getDeserializeResult() orelse utils.panicDeserializeResult;
+pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: anytype, msg_id: ?u64, prebind: bool) !utils.Response {
+    const result_ops = if (@TypeOf(message) == tl.AnyFunction) message.resultOps() else null;
     if (self.shutdown.load(.acquire)) {
         return SendError.Shutdown;
     }
@@ -2168,15 +2016,15 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         if (prebind and !self.connection_bound_auth_key) {
             break :blk .{ message, true };
         }
-        if (!self.init_ok) {
+        if (@TypeOf(message) == tl.AnyFunction and !self.init_ok) {
             try self.client_manager.session_info.lock.lockShared(io);
             self.client_manager.session_info.lock.unlockShared(io);
 
-            break :blk .{ tl.TL{
-                .InvokeWithLayer = &.{
+            break :blk .{ tl.AnyFunction{
+                .invokeWithLayer = &.{
                     .layer = tl.LAYER_VERSION,
-                    .query = tl.TL{
-                        .InitConnection = &.{
+                    .query = tl.AnyFunction{
+                        .initConnection = &.{
                             .api_id = self.client_manager.session_info.api_id,
                             .device_model = self.client_manager.session_info.device_model,
                             .system_version = self.client_manager.session_info.system_version,
@@ -2194,7 +2042,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
         break :blk .{ message, false };
     };
 
-    const len_serialized = message_to_send.serializeSize();
+    const len_serialized = try message_to_send.serializedSize();
 
     const id = self.current_id.fetchAdd(1, .seq_cst);
 
@@ -2223,7 +2071,7 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 
         errdefer allocator.free(buf);
 
-        _ = message_to_send.serialize(buf);
+        _ = try message_to_send.serialize(buf);
 
         const answer = brk: {
             try self.mutex.lock(io);
@@ -2233,16 +2081,15 @@ pub fn send(self: *Session, io: std.Io, allocator: std.mem.Allocator, message: t
 
             req.last_probed_at = .now(io, .boot);
 
-            req.deserializeResult = deserializeResult;
-            req.deserializeResultSize = deserializeResultSize;
+            req.result_ops = result_ops;
 
             break :brk req;
         };
 
         if (bootstrap_queue) {
-            try self.bootstrap_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message_to_send), .message_id = msg_id });
+            try self.bootstrap_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(std.mem.readInt(u32, buf[0..4], .little)), .message_id = msg_id });
         } else {
-            try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(message_to_send), .message_id = msg_id });
+            try self.requests_queue.putOne(io, .{ .id = id, .data = buf, .content_related = isContentRelated(std.mem.readInt(u32, buf[0..4], .little)), .message_id = msg_id });
         }
 
         break :answ answer;
@@ -2429,7 +2276,7 @@ pub fn deinit(self: *Session, io: std.Io, allocator: std.mem.Allocator) void {
 }
 
 pub fn init(self: *Session, io: std.Io, client_manager: *ClientManager, auth_key: *const [256]u8, dc: DcId, id: u8) !void {
-    log.info("Initializing session - {f}", .{dc});
+    log.info("Initializing session - {f}, auth key {any}", .{ dc, auth_key });
     self.* = Session{
         .dc = dc,
         // time is automatically synced with the server during auth key gen
@@ -2590,10 +2437,10 @@ test "send resolves rpc_result through reader and writer workers" {
 
             std.testing.expectEqual(test_session.session_id, packet.header.session_id) catch unreachable;
             std.testing.expectEqual(test_session.auth_key.first_salt, packet.header.salt) catch unreachable;
-            std.testing.expectEqual(tl.TL.Enum.ProtoPing, tl.TL.identify(std.mem.readInt(u32, packet.body[0..4], .little)).?) catch unreachable;
+            std.testing.expectEqual(tl.ping.tl_id, std.mem.readInt(u32, packet.body[0..4], .little)) catch unreachable;
 
-            var ping_buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
-            const ping, _, _ = tl.ProtoPing.deserialize(packet.body[4..], &ping_buf);
+            var ping_buf: [64]u8 align(tl.ping.out_alignment) = undefined;
+            const ping = tl.ping.decodeExact(packet.body, &ping_buf) catch unreachable;
             std.testing.expectEqual(expected_ping_id, ping.ping_id) catch unreachable;
 
             const response_msg_id = (test_session.message_id.get(test_io) & ~@as(u64, 3)) | 1;
@@ -2602,7 +2449,7 @@ test "send resolves rpc_result through reader and writer workers" {
                 test_io,
                 response_msg_id,
                 packet.header.message_id,
-                tl.TL{ .ProtoPong = &.{ .msg_id = packet.header.message_id, .ping_id = ping.ping_id } },
+                tl.AnyObject{ .pong = &.{ .msg_id = packet.header.message_id, .ping_id = ping.ping_id } },
             ) catch unreachable;
         }
     };
@@ -2616,15 +2463,11 @@ test "send resolves rpc_result through reader and writer workers" {
     const ping_id = 0x1122334455667788;
     try group.concurrent(io, ScriptedServer.run, .{ &server, &session, allocator, io, ping_id });
 
-    const response = try session.send(io, allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false);
+    const response = try session.send(io, allocator, tl.AnyFunction{ .ping = &.{ .ping_id = ping_id } }, null, false);
     defer response.deinit(allocator);
 
-    switch (response.data) {
-        .ProtoPong => |pong| {
-            try std.testing.expectEqual(ping_id, pong.ping_id);
-        },
-        else => return error.UnexpectedResponse,
-    }
+    const pong = (try response.from(tl.ping)).pong;
+    try std.testing.expectEqual(ping_id, pong.ping_id);
 
     try session.mutex.lock(io);
     defer session.mutex.unlock(io);
@@ -2692,26 +2535,22 @@ test "concurrent rpc queries" {
                     vfinish_event.set(io);
                 }
             }
-            const response = test_session.send(test_io, test_allocator, tl.TL{ .ProtoPing = &.{ .ping_id = ping_id } }, null, false) catch unreachable;
+            const response = test_session.send(test_io, test_allocator, tl.AnyFunction{ .ping = &.{ .ping_id = ping_id } }, null, false) catch unreachable;
             defer response.deinit(test_allocator);
 
-            switch (response.data) {
-                .ProtoPong => |pong| {
-                    std.testing.expectEqual(ping_id, pong.ping_id) catch unreachable;
-                    result.* = pong.ping_id;
-                },
-                else => unreachable,
-            }
+            const pong = (response.from(tl.ping) catch unreachable).pong;
+            std.testing.expectEqual(ping_id, pong.ping_id) catch unreachable;
+            result.* = pong.ping_id;
         }
     }.run;
 
     const TestServer = struct {
         fn appendPing(out: *[request_count]ClientRequest, out_len: *usize, msg_id: u64, body: []const u8) void {
             std.testing.expect(out_len.* < out.len) catch unreachable;
-            std.testing.expectEqual(tl.TL.Enum.ProtoPing, tl.TL.identify(std.mem.readInt(u32, body[0..4], .little)).?) catch unreachable;
+            std.testing.expectEqual(tl.ping.tl_id, std.mem.readInt(u32, body[0..4], .little)) catch unreachable;
 
-            var ping_buf: [@sizeOf(tl.ProtoPing)]u8 align(@alignOf(tl.ProtoPing)) = undefined;
-            const ping, _, _ = tl.ProtoPing.deserialize(body[4..], &ping_buf);
+            var ping_buf: [64]u8 align(tl.ping.out_alignment) = undefined;
+            const ping = tl.ping.decodeExact(body, &ping_buf) catch unreachable;
 
             out[out_len.*] = .{
                 .msg_id = msg_id,
@@ -2771,7 +2610,7 @@ test "concurrent rpc queries" {
             }
 
             const first_msg_id = (test_session.message_id.get(test_io) & ~@as(u64, 3)) | 1;
-            var pongs: [request_count]tl.ProtoPong = undefined;
+            var pongs: [request_count]tl.pong = undefined;
             var responses: [request_count]SessionTestServer.RpcResult = undefined;
 
             for (0..request_count) |i| {
@@ -2783,7 +2622,7 @@ test "concurrent rpc queries" {
                 responses[i] = .{
                     .msg_id = first_msg_id + @as(u64, @intCast(i)) * 4,
                     .req_msg_id = requests[request_index].msg_id,
-                    .result = tl.TL{ .ProtoPong = &pongs[i] },
+                    .result = tl.AnyObject{ .pong = &pongs[i] },
                 };
             }
 
@@ -2843,4 +2682,51 @@ test "concurrent rpc queries" {
         try std.testing.expectEqual(@as(usize, 0), session.pending_containers.count());
         try std.testing.expectEqual(@as(u32, 0), session.pending_requests.load(.seq_cst));
     }
+}
+
+test "gzip RPC bodies use the originating result codec and own their decoded data" {
+    const allocator = std.testing.allocator;
+    const ops = base.ResultOps.forType(tl.ping);
+    const compressed_pong = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x3b, 0x5a, 0x5c, 0x6e, 0xc2, 0xc4, 0x00, 0x01, 0xd5, 0x50, 0x1a, 0x00, 0xf6, 0x36, 0xe8, 0xb5, 0x14, 0x00, 0x00, 0x00 };
+    const compressed_error = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x93, 0x3c, 0xe5, 0xa2, 0x38, 0x81, 0x91, 0x81, 0x81, 0xd9, 0xc9, 0xd1, 0x05, 0x00, 0x04, 0xe6, 0x36, 0xdb, 0x0c, 0x00, 0x00, 0x00 };
+    var wire: [128]u8 = undefined;
+    const body = try tl.gzip_packed.serialize(&.{ .packed_data = &compressed_pong }, &wire);
+    const response = try decodeRPCResult(allocator, ops, body, 0);
+    defer response.deinit(allocator);
+    @memset(&wire, 0);
+    try std.testing.expectEqual(123, (try response.from(tl.ping)).pong.ping_id);
+    const error_body = try tl.gzip_packed.serialize(&.{ .packed_data = &compressed_error }, &wire);
+    const failure = try decodeRPCResult(allocator, ops, error_body, 0);
+    defer failure.deinit(allocator);
+    @memset(&wire, 0);
+    try std.testing.expectEqualStrings("BAD", failure.data.rpc_error.error_message);
+    try std.testing.expectError(error.InvalidData, decodeRPCResult(allocator, ops, &.{}, 128));
+}
+
+test "service replies resolve pending requests and keep salts independent of the packet" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const key: [256]u8 = @splat(0);
+    var client_manager: ClientManager = undefined;
+    var session: Session = undefined;
+    try session.init(io, &client_manager, &key, .{ .id = 2, .testmode = true }, 0);
+    defer session.deinit(io, allocator);
+    const pending = try session.pending_answers.create(allocator, 1);
+    pending.result_ops = base.ResultOps.forType(tl.get_future_salts);
+    try session.pending_answers_idmap.put(allocator, 42, 1);
+    var wire: [256]u8 = undefined;
+    const salts = [_]*const tl.future_salt{&.{ .valid_since = 1, .valid_until = 2, .salt = 123 }};
+    const body = try tl.future_salts.serialize(&.{ .req_msg_id = 42, .now = 1, .salts = &salts }, &wire);
+    try session.processMessage(io, allocator, .{ .msg_id = 9, .seqno = 0, .body = body });
+    // A duplicate reply must not replace or leak the first owned result.
+    try session.processMessage(io, allocator, .{ .msg_id = 13, .seqno = 0, .body = body });
+    @memset(&wire, 0);
+    const response = try pending.data.?;
+    try std.testing.expectEqual(AcknowledgmentStatus.answered, pending.status);
+    try std.testing.expectEqual(123, (try response.from(tl.get_future_salts)).future_salts.salts[0].salt);
+    try std.testing.expectEqual(123, session.salts.items[0].salt);
+    const ping = try tl.ping.serialize(&.{ .ping_id = 7 }, &wire);
+    try session.processMessage(io, allocator, .{ .msg_id = 17, .seqno = 1, .body = ping });
+    try std.testing.expectEqualSlices(u64, &.{17}, session.pending_ack.items);
+    try std.testing.expectError(error.InvalidData, session.processMessage(io, allocator, .{ .msg_id = 17, .seqno = 0, .body = &.{1} }));
 }

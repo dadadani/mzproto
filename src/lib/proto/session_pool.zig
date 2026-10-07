@@ -5,7 +5,7 @@ const Session = @import("session.zig");
 const ClientManager = @import("../client_manager.zig");
 const TransportConnector = @import("../transport_connector.zig");
 const tl = @import("tl");
-const Deserialized = @import("./utils.zig").Deserialized;
+const Response = @import("./utils.zig").Response;
 
 const log = std.log.scoped(.mzproto_sessionpool);
 const AUTOSCALE_TARGET_INFLIGHT_PER_SESSION: u32 = 8;
@@ -43,7 +43,7 @@ fn maybeScaleUpLocked(self: *SessionPool, allocator: std.mem.Allocator, io: std.
 
     const now = std.Io.Clock.now(.boot, io);
     if (self.last_autoscale_up) |last_up| {
-        const cooldown_end = last_up.addDuration(.fromSeconds(AUTOSCALE_SCALE_UP_COOLDOWN_SECONDS) );
+        const cooldown_end = last_up.addDuration(.fromSeconds(AUTOSCALE_SCALE_UP_COOLDOWN_SECONDS));
         if (cooldown_end.withClock(.boot).compare(.gt, now.withClock(.boot))) {
             return;
         }
@@ -150,7 +150,7 @@ pub fn check(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io) !void
 }
 
 /// Sends a message to the least busy session in the pool
-pub fn send(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.TL) !Deserialized {
+pub fn send(self: *SessionPool, allocator: std.mem.Allocator, io: std.Io, message: tl.AnyFunction) !Response {
     const session = blk: {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
