@@ -37,6 +37,15 @@ pub const Error = error{
     UnavailableDc,
 };
 
+fn connAuthKeyGen(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId) !AuthKey.GeneratedAuthKey {
+    const transport = (try self.connector.connectTo(allocator, io, dc)).?;
+    defer transport.deinit(io);
+
+    const gen_key = try AuthKey.generate(allocator, io, transport.transport, dc.id, dc.media, dc.testmode, false, null);
+
+    return gen_key;
+}
+
 /// The mutex is assumed to already be acquired.
 fn createPools(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: DcId) !*SessionPools {
     if (!self.connector.isAvailable(io, dc)) {
@@ -48,14 +57,21 @@ fn createPools(self: *Dispatcher, allocator: std.mem.Allocator, io: std.Io, dc: 
 
     const auth_key = (try self.storage.getDC(io, dc)) orelse key: {
         log.debug("{f} generating new permanent key", .{dc});
-        const transport = (try self.connector.connectTo(allocator, io, dc)).?;
-        defer transport.deinit(io);
 
-        const gen_key = try AuthKey.generate(allocator, io, transport.transport, dc.id, dc.media, dc.testmode, false, null);
+        const RETRY_IN = std.Io.Duration.fromMilliseconds(800);
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = RETRY_IN, .clock = .boot } };
 
-        try self.storage.putDC(allocator, io, dc, gen_key.auth_key);
+        while (true) {
+            const gen_key = self.connAuthKeyGen(allocator, io, dc) catch |err| {
+                log.warn("{f} Failed to generate permanent key, retrying in 800ms: {}", .{ dc, err });
+                try timeout.sleep(io);
+                continue;
+            };
 
-        break :key gen_key.auth_key;
+            try self.storage.putDC(allocator, io, dc, gen_key.auth_key);
+
+            break :key gen_key.auth_key;
+        }
     };
 
     pools.* = .{
