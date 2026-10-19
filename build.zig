@@ -47,7 +47,7 @@ fn detectPythonConfig(b: *std.Build, maybe_python_exe: ?[]const u8) PythonConfig
     };
 }
 
-fn createPythonBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, python_cfg: PythonConfig) *std.Build.Module {
+fn createPythonBindings(b: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode, python_cfg: PythonConfig) *std.Build.Module {
     const translate_c = b.dependency("translate_c", .{});
     const python_wrapper = b.addWriteFiles().add("python_wrapper.h",
         \\#define PY_SSIZE_T_CLEAN
@@ -91,7 +91,7 @@ fn buildPythonNativeSource(b: *std.Build) std.Build.LazyPath {
     return python_native_generator_step.addOutputFileArg("mzproto_lib_python.zig");
 }
 
-fn buildPythonExtension(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, mzproto_internal: *std.Build.Module, mzproto_bridge: *std.Build.Module, python_mod: *std.Build.Module, python_cfg: PythonConfig, native_source: std.Build.LazyPath) *std.Build.Step.InstallArtifact {
+fn buildPythonExtension(b: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode, mzproto_internal: *std.Build.Module, mzproto_bridge: *std.Build.Module, python_mod: *std.Build.Module, python_cfg: PythonConfig, native_source: std.Build.LazyPath) *std.Build.Step.InstallArtifact {
     const extension_module = b.createModule(.{
         .root_source_file = native_source,
         .target = target,
@@ -160,7 +160,7 @@ fn buildBridge(b: *std.Build, lang: TargetLanguage) std.Build.LazyPath {
     return bridge_path;
 }
 
-fn buildTLModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tlbase: *std.Build.Module, name: []const u8, generator: *std.Build.Step.Compile, dialect: enum { telegram, storage }, files: []const std.Build.LazyPath) *std.Build.Module {
+fn buildTLModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode, tlbase: *std.Build.Module, name: []const u8, generator: *std.Build.Step.Compile, dialect: enum { telegram, storage }, files: []const std.Build.LazyPath) *std.Build.Module {
     const run = b.addRunArtifact(generator);
 
     run.addArg(@tagName(dialect));
